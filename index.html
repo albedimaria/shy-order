@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shy Order</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div class="logo">Shy Order</div>
+  <div class="tagline">essere timidi ha il suo fascino</div>
+
+  <button id="call-btn" class="call-btn" aria-label="Avvia conversazione">
+    <span class="btn-icon">🎙</span>
+  </button>
+  <span class="btn-status" id="btn-status"></span>
+
+  <div class="disclaimer">
+    Prenota un tavolo o ordina cibo senza alzare il telefono.
+  </div>
+
+  <script type="module">
+    import { Conversation } from 'https://esm.sh/@11labs/client';
+
+    const btn = document.getElementById('call-btn');
+    const status = document.getElementById('btn-status');
+    let conversation = null;
+
+    function setState(state) {
+      btn.dataset.state = state;
+      const labels = {
+        idle:       '',
+        connecting: 'connessione…',
+        listening:  'ti ascolto…',
+        speaking:   'rispondo…',
+      };
+      status.textContent = labels[state] ?? '';
+    }
+
+    btn.addEventListener('click', async () => {
+      if (conversation) {
+        await conversation.endSession();
+        conversation = null;
+        setState('idle');
+        return;
+      }
+
+      setState('connecting');
+      btn.disabled = true;
+
+      try {
+        const { signed_url } = await fetch('https://shy-order-production.up.railway.app/signed-url').then(r => r.json());
+
+        conversation = await Conversation.startSession({
+          signedUrl: signed_url,
+          onConnect:    ()         => { btn.disabled = false; setState('listening'); },
+          onDisconnect: ()         => { conversation = null; setState('idle'); },
+          onModeChange: ({ mode }) => { if (conversation) setState(mode === 'speaking' ? 'speaking' : 'listening'); },
+          onError:      (err)      => { console.error(err); conversation = null; setState('idle'); btn.disabled = false; },
+        });
+      } catch (err) {
+        console.error(err);
+        setState('idle');
+        btn.disabled = false;
+      }
+    });
+  </script>
+
+</body>
+</html>

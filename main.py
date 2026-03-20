@@ -10,7 +10,7 @@ from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 
@@ -141,9 +141,41 @@ client_tools.register("save_restaurant_to_local_db", save_restaurant_to_local_db
 # FastAPI endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse("index.html")
+
+
+@app.get("/style.css")
+def css() -> FileResponse:
+    return FileResponse("style.css", media_type="text/css")
+
+
 @app.get("/health")
 def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+@app.get("/signed-url")
+def signed_url() -> JSONResponse:
+    load_dotenv()
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
+
+    import requests as _requests
+    try:
+        resp = _requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/token",
+            params={"agent_id": AGENT_ID},
+            headers={"xi-api-key": api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return JSONResponse(resp.json())
 
 
 @app.post("/tools")
@@ -192,7 +224,7 @@ def run_local() -> None:
         client_tools=client_tools,
     )
 
-    print(f"Starting voice conversation with agent {AGENT_ID}...")
+    input("Press Enter to start the conversation...")
     conversation.start_session()
 
 
