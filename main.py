@@ -10,6 +10,7 @@ from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
@@ -17,6 +18,13 @@ AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 TOOL_REGISTRY: dict[str, callable] = {}
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
