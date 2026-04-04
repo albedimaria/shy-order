@@ -5,95 +5,304 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Shy Order</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://js.stripe.com/v3/"></script>
 </head>
 <body>
 
   <div class="logo">Shy Order</div>
   <div class="tagline">essere timidi ha il suo fascino</div>
 
-  <div class="scrape-section">
-    <div class="scrape-row">
-      <input
-        type="url"
-        id="restaurant-url"
-        class="scrape-input"
-        placeholder="link ristorante (opzionale ma consigliato)"
-      />
-      <button id="scrape-btn" class="scrape-btn">Cerca</button>
+  <!-- ── Auth screen ─────────────────────────────────────────── -->
+  <div id="screen-auth" class="screen hidden">
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-tab="login">Accedi</button>
+      <button class="auth-tab" data-tab="register">Registrati</button>
     </div>
-    <div id="scrape-result" class="scrape-result"></div>
+    <form id="auth-form" class="auth-form">
+      <input type="email"    id="auth-email"    class="auth-input" placeholder="Email"    required />
+      <input type="password" id="auth-password" class="auth-input" placeholder="Password" required />
+      <button type="submit"  id="auth-submit"   class="primary-btn">Accedi</button>
+      <p id="auth-error" class="form-error"></p>
+    </form>
   </div>
 
-  <div class="arrow-annotation">
-    <span>i know i'm not a designer but it works,<br>trust me i'm an engineer</span>
-    <svg class="arrow-svg" width="16" height="24" viewBox="0 0 16 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M8 2 L8 20 M8 20 L3 14 M8 20 L13 14" stroke="#444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
+  <!-- ── Payment setup screen ───────────────────────────────── -->
+  <div id="screen-payment" class="screen hidden">
+    <p class="section-title">Aggiungi una carta</p>
+    <p class="section-sub">Ti verrà addebitato €0,15/min + €0,20 a conversazione.</p>
+    <div id="card-element" class="card-element"></div>
+    <button id="save-card-btn" class="primary-btn">Salva carta</button>
+    <p id="payment-error" class="form-error"></p>
   </div>
 
-  <div id="widget-container">
-    <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
+  <!-- ── Main screen ────────────────────────────────────────── -->
+  <div id="screen-main" class="screen hidden">
+    <div class="scrape-section">
+      <div class="scrape-row">
+        <input
+          type="url"
+          id="restaurant-url"
+          class="scrape-input"
+          placeholder="link ristorante (opzionale ma consigliato)"
+        />
+        <button id="scrape-btn" class="scrape-btn">Cerca</button>
+      </div>
+      <div id="scrape-result" class="scrape-result"></div>
+    </div>
+
+    <div class="arrow-annotation">
+      <span>i know i'm not a designer but it works,<br>trust me i'm an engineer</span>
+      <svg class="arrow-svg" width="16" height="24" viewBox="0 0 16 24" fill="none">
+        <path d="M8 2 L8 20 M8 20 L3 14 M8 20 L13 14" stroke="#444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <button id="call-btn" class="call-btn" aria-label="Avvia conversazione">
+      <span class="btn-icon">🎙</span>
+    </button>
+    <span id="btn-status" class="btn-status"></span>
+    <p id="session-cost" class="session-cost"></p>
+
+    <button id="logout-btn" class="logout-btn">Esci</button>
   </div>
-  <script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
 
   <div class="disclaimer">
     Prenota un tavolo o ordina cibo senza alzare il telefono.
   </div>
 
-  <script>
-    const scrapeBtn = document.getElementById('scrape-btn');
-    const urlInput  = document.getElementById('restaurant-url');
-    const resultDiv = document.getElementById('scrape-result');
-    const widgetContainer = document.getElementById('widget-container');
+  <script type="module">
+    import { Conversation } from 'https://esm.sh/@11labs/client';
 
-    const AGENT_ID = 'agent_9901kjyr4vwpeyyr2rc3e37qkncs';
+    // ── State ──────────────────────────────────────────────────────────────────
+    let token         = localStorage.getItem('sb_token');
+    let stripeObj     = null;
+    let cardElement   = null;
+    let conversation  = null;
+    let sessionId     = null;
+    let sessionStart  = null;
+    let restaurantData = {};
+    let authMode      = 'login';
 
-    function rebuildWidget(dynamicVars) {
-      widgetContainer.innerHTML = '';
-      const widget = document.createElement('elevenlabs-convai');
-      widget.setAttribute('agent-id', AGENT_ID);
-      if (dynamicVars) {
-        widget.setAttribute('dynamic-variables', JSON.stringify(dynamicVars));
-      }
-      widgetContainer.appendChild(widget);
+    // ── Screens ────────────────────────────────────────────────────────────────
+    function showScreen(name) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
+      document.getElementById(`screen-${name}`).classList.remove('hidden');
     }
 
-    scrapeBtn.addEventListener('click', async () => {
-      const url = urlInput.value.trim();
-      if (!url) return;
+    // ── API helper ─────────────────────────────────────────────────────────────
+    function api(path, opts = {}) {
+      const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      return fetch(path, { ...opts, headers });
+    }
 
-      scrapeBtn.disabled = true;
-      scrapeBtn.textContent = '…';
-      resultDiv.className = 'scrape-result';
-      resultDiv.textContent = '';
+    // ── Auth ───────────────────────────────────────────────────────────────────
+    document.querySelectorAll('.auth-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        authMode = tab.dataset.tab;
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('auth-submit').textContent = authMode === 'login' ? 'Accedi' : 'Registrati';
+        document.getElementById('auth-error').textContent = '';
+      });
+    });
+
+    document.getElementById('auth-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email    = document.getElementById('auth-email').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const submit   = document.getElementById('auth-submit');
+      const errEl    = document.getElementById('auth-error');
+      submit.disabled = true;
+      errEl.textContent = '';
 
       try {
-        const res = await fetch('/scrape', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url }),
-        });
-        if (!res.ok) throw new Error(await res.text());
+        const path = authMode === 'login' ? '/auth/login' : '/auth/register';
+        const res  = await api(path, { method: 'POST', body: JSON.stringify({ email, password }) });
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Errore di autenticazione');
 
-        const parts = [data.name, data.phone_number, data.address, data.hours].filter(Boolean);
-        resultDiv.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
-        resultDiv.classList.add(parts.length ? 'found' : 'empty');
+        token = data.access_token;
+        localStorage.setItem('sb_token', token);
 
-        rebuildWidget({
-          restaurant_name:    data.name         || '',
-          restaurant_phone:   data.phone_number || '',
-          restaurant_address: data.address      || '',
-          restaurant_hours:   data.hours        || '',
-        });
+        if (data.has_payment_method) {
+          showScreen('main');
+        } else {
+          await initStripe();
+          showScreen('payment');
+        }
       } catch (err) {
-        resultDiv.textContent = 'Errore: ' + err.message;
-        resultDiv.classList.add('error');
+        errEl.textContent = err.message;
       } finally {
-        scrapeBtn.disabled = false;
-        scrapeBtn.textContent = 'Cerca';
+        submit.disabled = false;
       }
     });
+
+    // ── Stripe / payment setup ─────────────────────────────────────────────────
+    async function initStripe() {
+      if (stripeObj) return;
+      const { stripe_publishable_key } = await api('/config').then(r => r.json());
+      stripeObj = Stripe(stripe_publishable_key);
+      const elements = stripeObj.elements({ appearance: { theme: 'night' } });
+      cardElement = elements.create('card', {
+        style: { base: { color: '#f0f0f0', fontFamily: 'Georgia, serif', fontSize: '14px', '::placeholder': { color: '#555' } } },
+      });
+      cardElement.mount('#card-element');
+    }
+
+    document.getElementById('save-card-btn').addEventListener('click', async () => {
+      const btn   = document.getElementById('save-card-btn');
+      const errEl = document.getElementById('payment-error');
+      btn.disabled = true;
+      errEl.textContent = '';
+
+      try {
+        const res = await api('/payment/setup', { method: 'POST' });
+        const { client_secret } = await res.json();
+        if (!res.ok) throw new Error(client_secret || 'Errore');
+
+        const result = await stripeObj.confirmCardSetup(client_secret, {
+          payment_method: { card: cardElement },
+        });
+        if (result.error) throw new Error(result.error.message);
+
+        showScreen('main');
+      } catch (err) {
+        errEl.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ── Scrape ─────────────────────────────────────────────────────────────────
+    document.getElementById('scrape-btn').addEventListener('click', async () => {
+      const url    = document.getElementById('restaurant-url').value.trim();
+      const btn    = document.getElementById('scrape-btn');
+      const result = document.getElementById('scrape-result');
+      if (!url) return;
+
+      btn.disabled = true;
+      btn.textContent = '…';
+      result.textContent = '';
+      result.className = 'scrape-result';
+
+      try {
+        const res = await api('/scrape', { method: 'POST', body: JSON.stringify({ url }) });
+        if (!res.ok) throw new Error(await res.text());
+        restaurantData = await res.json();
+        const parts = [restaurantData.name, restaurantData.phone_number, restaurantData.address, restaurantData.hours].filter(Boolean);
+        result.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
+        result.classList.add(parts.length ? 'found' : 'empty');
+      } catch (err) {
+        result.textContent = 'Errore: ' + err.message;
+        result.classList.add('error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Cerca';
+      }
+    });
+
+    // ── Session / mic ──────────────────────────────────────────────────────────
+    const callBtn    = document.getElementById('call-btn');
+    const btnStatus  = document.getElementById('btn-status');
+    const costEl     = document.getElementById('session-cost');
+
+    function setCallState(state) {
+      callBtn.dataset.state = state;
+      const labels = { idle: '', connecting: 'connessione…', listening: 'ti ascolto…', speaking: 'rispondo…' };
+      btnStatus.textContent = labels[state] ?? '';
+    }
+
+    callBtn.addEventListener('click', async () => {
+      if (conversation) {
+        await conversation.endSession();
+        return;
+      }
+
+      setCallState('connecting');
+      callBtn.disabled = true;
+      costEl.textContent = '';
+
+      try {
+        const res  = await api('/session/start', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Errore avvio sessione');
+
+        sessionId = data.session_id;
+
+        const dynVars = {};
+        if (restaurantData.name)         dynVars.restaurant_name    = restaurantData.name;
+        if (restaurantData.phone_number)  dynVars.restaurant_phone   = restaurantData.phone_number;
+        if (restaurantData.address)       dynVars.restaurant_address = restaurantData.address;
+        if (restaurantData.hours)         dynVars.restaurant_hours   = restaurantData.hours;
+
+        conversation = await Conversation.startSession({
+          signedUrl: data.signed_url,
+          ...(Object.keys(dynVars).length && { dynamicVariables: dynVars }),
+          onConnect: () => {
+            sessionStart = Date.now();
+            callBtn.disabled = false;
+            setCallState('listening');
+          },
+          onDisconnect: async () => {
+            const duration = sessionStart ? Math.round((Date.now() - sessionStart) / 1000) : 0;
+            conversation = null;
+            sessionStart = null;
+            setCallState('idle');
+            if (sessionId && duration > 0) {
+              try {
+                const r = await api('/session/end', {
+                  method: 'POST',
+                  body: JSON.stringify({ session_id: sessionId, duration_seconds: duration }),
+                });
+                const d = await r.json();
+                if (r.ok && d.amount_charged) {
+                  const euros = (d.amount_charged / 100).toFixed(2).replace('.', ',');
+                  costEl.textContent = `Sessione terminata · €${euros} addebitati`;
+                }
+              } catch (_) {}
+              sessionId = null;
+            }
+          },
+          onModeChange: ({ mode }) => {
+            if (conversation) setCallState(mode === 'speaking' ? 'speaking' : 'listening');
+          },
+          onError: (err) => {
+            console.error('[shy-order] session error:', err);
+            conversation = null;
+            setCallState('idle');
+            callBtn.disabled = false;
+          },
+        });
+      } catch (err) {
+        console.error('[shy-order]', err);
+        setCallState('idle');
+        callBtn.disabled = false;
+      }
+    });
+
+    // ── Logout ─────────────────────────────────────────────────────────────────
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      localStorage.removeItem('sb_token');
+      token = null;
+      showScreen('auth');
+    });
+
+    // ── Init ───────────────────────────────────────────────────────────────────
+    async function init() {
+      if (!token) { showScreen('auth'); return; }
+      try {
+        const res = await api('/payment/status');
+        if (res.status === 401) { localStorage.removeItem('sb_token'); token = null; showScreen('auth'); return; }
+        const { has_payment_method } = await res.json();
+        if (!has_payment_method) { await initStripe(); showScreen('payment'); }
+        else showScreen('main');
+      } catch (_) {
+        showScreen('auth');
+      }
+    }
+
+    init();
   </script>
 
 </body>

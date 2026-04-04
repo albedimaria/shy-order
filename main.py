@@ -1,41 +1,84 @@
 import argparse
 import json
+import math
 import os
 import re
 import sys
 from pathlib import Path
 
 import requests as _requests
+import stripe as _stripe
 import uvicorn
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from supabase import create_client as _create_supabase_client
 
 load_dotenv()
 
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 
-TOOL_REGISTRY: dict[str, callable] = {}
+# ---------------------------------------------------------------------------
+# External clients
+# ---------------------------------------------------------------------------
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+_supabase_url = os.getenv("SUPABASE_URL", "")
+_supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+supabase_admin = (
+    _create_supabase_client(_supabase_url, _supabase_service_key)
+    if _supabase_url and _supabase_service_key
+    else None
 )
 
+_stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+_http_bearer = HTTPBearer()
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+async def _get_user(creds: HTTPAuthorizationCredentials = Depends(_http_bearer)):
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    try:
+        resp = supabase_admin.auth.get_user(creds.credentials)
+        return resp.user
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class ScrapeRequest(BaseModel):
+    url: str
+
+class EndSessionRequest(BaseModel):
+    session_id: str
+    duration_seconds: int
 
 # ---------------------------------------------------------------------------
 # Restaurant DB helpers
 # ---------------------------------------------------------------------------
+
+TOOL_REGISTRY: dict[str, callable] = {}
+
 
 def get_or_create_restaurant(
     name: str,
@@ -43,13 +86,7 @@ def get_or_create_restaurant(
     address: str,
     db_path: str | os.PathLike[str] = "restaurants.json",
 ) -> dict:
-    """
-    Save restaurant info to a local JSON file acting as a simple database.
-    If the restaurant already exists (matched by name, case-insensitive),
-    return the existing record instead of saving a new one.
-    """
     db_file = Path(db_path)
-
     if db_file.exists():
         try:
             with db_file.open("r", encoding="utf-8") as f:
@@ -58,7 +95,6 @@ def get_or_create_restaurant(
             data = []
     else:
         data = []
-
     if not isinstance(data, list):
         data = []
 
@@ -73,14 +109,12 @@ def get_or_create_restaurant(
         "address": address.strip(),
     }
     data.append(new_restaurant)
-
     try:
         with db_file.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except OSError as e:
         print(f"Error writing to restaurant database file: {e}", file=sys.stderr)
         sys.exit(1)
-
     return new_restaurant
 
 
@@ -91,19 +125,15 @@ def get_or_create_restaurant(
 def lookup_restaurant_tool(parameters: dict) -> dict:
     name_query = parameters.get("name", "").strip().lower()
     db_file = Path("restaurants.json")
-
     if not db_file.exists():
         return {"found": False}
-
     try:
         with db_file.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {"found": False}
-
     if not isinstance(data, list):
         return {"found": False}
-
     for restaurant in data:
         if isinstance(restaurant, dict) and name_query in restaurant.get("name", "").strip().lower():
             return {
@@ -112,67 +142,27 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
                 "phone_number": restaurant["phone_number"],
                 "address": restaurant["address"],
             }
-
     return {"found": False}
 
 
 def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
-    """
-    ElevenLabs client tool callback.
-
-    Expected parameters (as configured in the Shy Order agent tools):
-      - name: string
-      - phone_number: string
-      - address: string
-
-    When Shy Order completes a reservation, it should call this tool
-    so the restaurant is stored in the local restaurants.json database.
-    """
-    name = parameters.get("name", "")
-    phone_number = parameters.get("phone_number", "")
-    address = parameters.get("address", "")
-
     return get_or_create_restaurant(
-        name=name,
-        phone_number=phone_number,
-        address=address,
+        name=parameters.get("name", ""),
+        phone_number=parameters.get("phone_number", ""),
+        address=parameters.get("address", ""),
     )
 
 
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
 TOOL_REGISTRY["save_restaurant_to_local_db"] = save_restaurant_to_local_db_tool
 
-# ---------------------------------------------------------------------------
-# ElevenLabs ClientTools (used in --local mode)
-# ---------------------------------------------------------------------------
-
 client_tools = ClientTools()
 client_tools.register("lookup_restaurant", lookup_restaurant_tool)
 client_tools.register("save_restaurant_to_local_db", save_restaurant_to_local_db_tool)
 
-
 # ---------------------------------------------------------------------------
-# FastAPI endpoints
+# Scraping helpers
 # ---------------------------------------------------------------------------
-
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse("index.html")
-
-
-@app.get("/style.css")
-def css() -> FileResponse:
-    return FileResponse("style.css", media_type="text/css")
-
-
-@app.get("/health")
-def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
-
-
-class ScrapeRequest(BaseModel):
-    url: str
-
 
 def _scrape_name(soup: BeautifulSoup) -> str | None:
     og = soup.find("meta", property="og:title")
@@ -226,6 +216,239 @@ def _scrape_hours(soup: BeautifulSoup) -> str | None:
             return el.get_text(" ", strip=True)[:300]
     return None
 
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# Static files
+# ---------------------------------------------------------------------------
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse("index.html")
+
+@app.get("/style.css")
+def css() -> FileResponse:
+    return FileResponse("style.css", media_type="text/css")
+
+@app.get("/health")
+def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+@app.get("/config")
+def config() -> JSONResponse:
+    return JSONResponse({"stripe_publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", "")})
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/auth/register")
+def auth_register(req: RegisterRequest) -> JSONResponse:
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    try:
+        auth_resp = supabase_admin.auth.admin.create_user({
+            "email": req.email,
+            "password": req.password,
+            "email_confirm": True,
+        })
+        user = auth_resp.user
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Create Stripe customer
+    try:
+        customer = _stripe.Customer.create(email=req.email)
+        stripe_customer_id = customer.id
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+    # Save to public.users
+    supabase_admin.table("users").insert({
+        "id": str(user.id),
+        "email": req.email,
+        "stripe_customer_id": stripe_customer_id,
+    }).execute()
+
+    # Sign in to get access token
+    try:
+        sign_in = supabase_admin.auth.sign_in_with_password({"email": req.email, "password": req.password})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse({
+        "access_token": sign_in.session.access_token,
+        "user": {"id": str(user.id), "email": req.email},
+        "has_payment_method": False,
+    })
+
+
+@app.post("/auth/login")
+def auth_login(req: LoginRequest) -> JSONResponse:
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    try:
+        resp = supabase_admin.auth.sign_in_with_password({"email": req.email, "password": req.password})
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    user = resp.user
+    # Check payment method
+    has_payment_method = False
+    try:
+        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+        stripe_customer_id = record.data.get("stripe_customer_id")
+        if stripe_customer_id:
+            pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+            has_payment_method = len(pms.data) > 0
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "access_token": resp.session.access_token,
+        "user": {"id": str(user.id), "email": user.email},
+        "has_payment_method": has_payment_method,
+    })
+
+# ---------------------------------------------------------------------------
+# Payment endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/payment/status")
+def payment_status(user=Depends(_get_user)) -> JSONResponse:
+    try:
+        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+        stripe_customer_id = record.data.get("stripe_customer_id")
+        if not stripe_customer_id:
+            return JSONResponse({"has_payment_method": False})
+        pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+        return JSONResponse({"has_payment_method": len(pms.data) > 0})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/payment/setup")
+def payment_setup(user=Depends(_get_user)) -> JSONResponse:
+    try:
+        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+        stripe_customer_id = record.data.get("stripe_customer_id")
+        if not stripe_customer_id:
+            raise HTTPException(status_code=404, detail="Stripe customer not found")
+        intent = _stripe.SetupIntent.create(
+            customer=stripe_customer_id,
+            payment_method_types=["card"],
+            usage="off_session",
+        )
+        return JSONResponse({"client_secret": intent.client_secret})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Session endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/session/start")
+def session_start(user=Depends(_get_user)) -> JSONResponse:
+    # Verify payment method exists
+    try:
+        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+        stripe_customer_id = record.data.get("stripe_customer_id")
+        pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+        if not pms.data:
+            raise HTTPException(status_code=402, detail="No payment method on file")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Create session record
+    try:
+        session_resp = supabase_admin.table("sessions").insert({"user_id": str(user.id)}).execute()
+        session_id = session_resp.data[0]["id"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not create session: {e}")
+
+    # Get ElevenLabs signed URL
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
+    try:
+        resp = _requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/token",
+            params={"agent_id": AGENT_ID},
+            headers={"xi-api-key": api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs error: {e}")
+
+    return JSONResponse({"signed_url": signed_url, "session_id": session_id})
+
+
+@app.post("/session/end")
+def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse:
+    # Cost: €0.10/min ElevenLabs + €0.05/min Twilio + €0.20 flat fee
+    minutes = math.ceil(req.duration_seconds / 60)
+    amount_cents = minutes * 15 + 20  # 15 cents/min + 20 cents flat
+
+    try:
+        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+        stripe_customer_id = record.data.get("stripe_customer_id")
+        pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+        if not pms.data:
+            raise HTTPException(status_code=402, detail="No payment method on file")
+        pm_id = pms.data[0].id
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Charge
+    try:
+        payment_intent = _stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency="eur",
+            customer=stripe_customer_id,
+            payment_method=pm_id,
+            confirm=True,
+            off_session=True,
+        )
+        pi_id = payment_intent.id
+    except _stripe.error.CardError as e:
+        raise HTTPException(status_code=402, detail=str(e.user_message))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Update session record
+    from datetime import datetime, timezone
+    supabase_admin.table("sessions").update({
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": req.duration_seconds,
+        "amount_charged": amount_cents,
+        "stripe_payment_intent_id": pi_id,
+    }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+
+    return JSONResponse({"amount_charged": amount_cents, "duration_seconds": req.duration_seconds})
+
+# ---------------------------------------------------------------------------
+# Scrape endpoint
+# ---------------------------------------------------------------------------
 
 @app.post("/scrape")
 def scrape(req: ScrapeRequest) -> JSONResponse:
@@ -247,26 +470,20 @@ def scrape(req: ScrapeRequest) -> JSONResponse:
         "hours":        _scrape_hours(soup),
     })
 
+# ---------------------------------------------------------------------------
+# Tools webhook
+# ---------------------------------------------------------------------------
 
 @app.post("/tools")
 async def tools_webhook(payload: dict) -> JSONResponse:
-    """
-    Receives ElevenLabs tool call webhooks.
-    Expected payload shape: {"tool_name": "...", "parameters": {...}}
-    """
     tool_name = payload.get("tool_name")
     parameters = payload.get("parameters", {})
-
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
-
     handler = TOOL_REGISTRY.get(tool_name)
     if handler is None:
         raise HTTPException(status_code=404, detail=f"Unknown tool: '{tool_name}'")
-
-    result = handler(parameters)
-    return JSONResponse(result)
-
+    return JSONResponse(handler(parameters))
 
 # ---------------------------------------------------------------------------
 # Entry points
@@ -277,14 +494,12 @@ def run_local() -> None:
     if not api_key:
         print(
             "Error: ELEVENLABS_API_KEY is not set.\n"
-            "Create a .env file in this directory with a line like:\n"
-            "ELEVENLABS_API_KEY=your_api_key_here",
+            "Create a .env file with: ELEVENLABS_API_KEY=your_key",
             file=sys.stderr,
         )
         sys.exit(1)
 
     client = ElevenLabs(api_key=api_key)
-
     conversation = Conversation(
         client=client,
         agent_id=AGENT_ID,
@@ -292,16 +507,14 @@ def run_local() -> None:
         audio_interface=DefaultAudioInterface(),
         client_tools=client_tools,
     )
-
     input("Press Enter to start the conversation...")
     conversation.start_session()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local", action="store_true", help="Run local voice session instead of web server")
+    parser.add_argument("--local", action="store_true")
     args = parser.parse_args()
-
     if args.local:
         run_local()
     else:
