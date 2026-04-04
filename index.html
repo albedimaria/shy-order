@@ -81,7 +81,6 @@
     let sessionId     = null;
     let sessionStart  = null;
     let restaurantData = {};
-    let authMode      = 'login';
 
     // ── Screens ────────────────────────────────────────────────────────────────
     function showScreen(name) {
@@ -97,46 +96,7 @@
     }
 
     // ── Auth ───────────────────────────────────────────────────────────────────
-    document.querySelectorAll('.auth-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        authMode = tab.dataset.tab;
-        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('auth-submit').textContent = authMode === 'login' ? 'Accedi' : 'Registrati';
-        document.getElementById('auth-error').textContent = '';
-      });
-    });
-
-    document.getElementById('auth-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const email    = document.getElementById('auth-email').value.trim();
-      const password = document.getElementById('auth-password').value;
-      const submit   = document.getElementById('auth-submit');
-      const errEl    = document.getElementById('auth-error');
-      submit.disabled = true;
-      errEl.textContent = '';
-
-      try {
-        const path = authMode === 'login' ? '/auth/login' : '/auth/register';
-        const res  = await api(path, { method: 'POST', body: JSON.stringify({ email, password }) });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Errore di autenticazione');
-
-        token = data.access_token;
-        localStorage.setItem('sb_token', token);
-
-        if (data.has_payment_method) {
-          showScreen('main');
-        } else {
-          await initStripe();
-          showScreen('payment');
-        }
-      } catch (err) {
-        errEl.textContent = err.message;
-      } finally {
-        submit.disabled = false;
-      }
-    });
+    // (solo Google OAuth — nessun form email/password)
 
     // ── Stripe / payment setup ─────────────────────────────────────────────────
     async function initStripe() {
