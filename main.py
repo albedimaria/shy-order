@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+load_dotenv()
+
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 
 TOOL_REGISTRY: dict[str, callable] = {}
@@ -212,7 +214,6 @@ async def tools_webhook(payload: dict) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 def run_local() -> None:
-    load_dotenv()
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         print(
