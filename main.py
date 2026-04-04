@@ -166,29 +166,6 @@ def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-@app.get("/signed-url")
-def signed_url() -> JSONResponse:
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
-
-    import requests as _requests
-    try:
-        resp = _requests.get(
-            "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
-            headers={"xi-api-key": api_key},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        print(f"[signed-url] keys: {list(data.keys())}", flush=True)
-        print(f"[signed-url] full response: {data}", flush=True)
-        return JSONResponse({"signed_url": f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"})
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-
 @app.post("/tools")
 async def tools_webhook(payload: dict) -> JSONResponse:
     """

@@ -26,73 +26,9 @@ body {
   letter-spacing: 0.02em;
 }
 
-/* ---- call button ---- */
-
-.call-btn {
+elevenlabs-convai {
   margin-top: 2rem;
-  background: none;
-  border: none;
-  cursor: pointer;
-  outline: none;
-  padding: 0;
 }
-
-.btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 6rem;
-  height: 6rem;
-  border-radius: 50%;
-  background: #ffffff;
-  font-size: 2.2rem;
-  transition: background 0.2s, transform 0.15s;
-}
-
-.call-btn:hover .btn-icon {
-  background: #e0e0e0;
-  transform: scale(1.06);
-}
-
-.call-btn:disabled .btn-icon {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.btn-status {
-  display: block;
-  height: 1.2rem;
-  margin-top: 0.8rem;
-  text-align: center;
-  font-size: 0.8rem;
-  font-style: italic;
-  color: #666;
-  letter-spacing: 0.02em;
-}
-
-/* active states */
-
-.call-btn[data-state="connecting"] .btn-icon,
-.call-btn[data-state="listening"]  .btn-icon {
-  animation: pulse 1.4s ease-in-out infinite;
-}
-
-.call-btn[data-state="speaking"] .btn-icon {
-  animation: pulse-fast 0.7s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.15); }
-  50%       { box-shadow: 0 0 0 14px rgba(255,255,255,0); }
-}
-
-@keyframes pulse-fast {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.2); }
-  50%       { box-shadow: 0 0 0 20px rgba(255,255,255,0); }
-}
-
-/* ---- disclaimer ---- */
 
 .disclaimer {
   font-size: 0.8rem;

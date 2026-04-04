@@ -11,68 +11,12 @@
   <div class="logo">Shy Order</div>
   <div class="tagline">essere timidi ha il suo fascino</div>
 
-  <button id="call-btn" class="call-btn" aria-label="Avvia conversazione">
-    <span class="btn-icon">🎙</span>
-  </button>
-  <span class="btn-status" id="btn-status"></span>
+  <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
+  <script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
 
   <div class="disclaimer">
     Prenota un tavolo o ordina cibo senza alzare il telefono.
   </div>
-
-  <script type="module">
-    import { Conversation } from 'https://esm.sh/@11labs/client';
-
-    const btn = document.getElementById('call-btn');
-    const status = document.getElementById('btn-status');
-    let conversation = null;
-
-    function setState(state) {
-      btn.dataset.state = state;
-      const labels = {
-        idle:       '',
-        connecting: 'connessione…',
-        listening:  'ti ascolto…',
-        speaking:   'rispondo…',
-      };
-      status.textContent = labels[state] ?? '';
-    }
-
-    btn.addEventListener('click', async () => {
-      if (conversation) {
-        await conversation.endSession();
-        conversation = null;
-        setState('idle');
-        return;
-      }
-
-      setState('connecting');
-      btn.disabled = true;
-
-      try {
-        const res = await fetch('https://shy-order-production.up.railway.app/signed-url');
-        if (!res.ok) throw new Error(`/signed-url HTTP ${res.status}: ${await res.text()}`);
-        const body = await res.json();
-        console.log('[shy-order] signed_url response:', body);
-        const { signed_url } = body;
-        if (!signed_url) throw new Error('signed_url missing from response');
-        console.log('[shy-order] starting ElevenLabs session with signed_url:', signed_url);
-
-        conversation = await Conversation.startSession({
-          signedUrl: signed_url,
-          onConnect:    ()         => { console.log('[shy-order] connected'); btn.disabled = false; setState('listening'); },
-          onDisconnect: ()         => { console.log('[shy-order] disconnected'); conversation = null; setState('idle'); },
-          onModeChange: ({ mode }) => { if (conversation) setState(mode === 'speaking' ? 'speaking' : 'listening'); },
-          onError:      (err)      => { console.error('[shy-order] session error:', err); conversation = null; setState('idle'); btn.disabled = false; },
-        });
-        console.log('[shy-order] Conversation.startSession resolved:', conversation);
-      } catch (err) {
-        console.error('[shy-order] caught error:', err);
-        setState('idle');
-        btn.disabled = false;
-      }
-    });
-  </script>
 
 </body>
 </html>

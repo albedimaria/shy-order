@@ -1,5 +1,4 @@
 python-dotenv
-requests
 elevenlabs
 fastapi
 uvicorn[standard]
