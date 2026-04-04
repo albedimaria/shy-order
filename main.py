@@ -184,7 +184,7 @@ def signed_url() -> JSONResponse:
         data = resp.json()
         print(f"[signed-url] keys: {list(data.keys())}", flush=True)
         print(f"[signed-url] full response: {data}", flush=True)
-        return JSONResponse({"signed_url": data["token"]})
+        return JSONResponse({"signed_url": f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"})
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
