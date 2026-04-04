@@ -180,7 +180,8 @@ def signed_url() -> JSONResponse:
         )
         resp.raise_for_status()
         data = resp.json()
-        print(f"[signed-url] ElevenLabs response: {data}", flush=True)
+        print(f"[signed-url] ElevenLabs response keys: {list(data.keys())}", flush=True)
+        print(f"[signed-url] ElevenLabs full response: {data}", flush=True)
         # Map whichever field ElevenLabs returns to the expected "signed_url"
         signed_url_value = data.get("signed_url") or data.get("token")
         if not signed_url_value:
