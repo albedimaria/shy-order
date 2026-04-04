@@ -179,7 +179,9 @@ def signed_url() -> JSONResponse:
             timeout=10,
         )
         resp.raise_for_status()
-        return JSONResponse(resp.json())
+        data = resp.json()
+        print(f"[signed-url] ElevenLabs response: {data}", flush=True)
+        return JSONResponse(data)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
