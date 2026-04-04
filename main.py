@@ -170,10 +170,16 @@ def signed_url() -> JSONResponse:
     if not api_key:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
 
+    import requests as _requests
     try:
-        client = ElevenLabs(api_key=api_key)
-        response = client.conversational_ai.get_signed_url(agent_id=AGENT_ID)
-        return JSONResponse({"signed_url": response.signed_url})
+        resp = _requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/token",
+            params={"agent_id": AGENT_ID},
+            headers={"xi-api-key": api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return JSONResponse(resp.json())
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
