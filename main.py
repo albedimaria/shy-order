@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from supabase import create_client as _create_supabase_client
@@ -320,6 +320,89 @@ def auth_login(req: LoginRequest) -> JSONResponse:
         "user": {"id": str(user.id), "email": user.email},
         "has_payment_method": has_payment_method,
     })
+
+# ---------------------------------------------------------------------------
+# Google OAuth endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/auth/google")
+def auth_google(request: Request) -> RedirectResponse:
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    base_url = str(request.base_url).rstrip("/")
+    # Use Supabase's authorize endpoint directly (implicit flow — no code verifier needed)
+    oauth_url = (
+        f"{_supabase_url}/auth/v1/authorize"
+        f"?provider=google"
+        f"&redirect_to={base_url}/auth/callback"
+    )
+    return RedirectResponse(url=oauth_url)
+
+
+@app.get("/auth/callback")
+def auth_callback() -> HTMLResponse:
+    """
+    Supabase redirects here with #access_token=... in the URL fragment.
+    Serve a minimal page that reads the fragment, syncs the user with Stripe,
+    then forwards to the main app with ?token=...&has_payment=...
+    """
+    html = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"/><title>Accesso…</title></head>
+<body style="background:#0e0e0e;color:#666;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+<p>Accesso in corso…</p>
+<script>
+const hash = new URLSearchParams(window.location.hash.slice(1));
+const token = hash.get('access_token');
+if (!token) {
+  window.location.href = '/?error=no_token';
+} else {
+  fetch('/auth/google-complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }
+  })
+  .then(r => r.json())
+  .then(d => {
+    window.location.href = '/?token=' + encodeURIComponent(token)
+      + '&has_payment=' + (d.has_payment_method ? '1' : '0');
+  })
+  .catch(() => {
+    window.location.href = '/?token=' + encodeURIComponent(token) + '&has_payment=0';
+  });
+}
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/auth/google-complete")
+def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
+    """Ensure a Stripe customer exists for this OAuth user, return payment status."""
+    try:
+        existing = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not existing.data:
+        # First login — create Stripe customer and insert user record
+        try:
+            customer = _stripe.Customer.create(email=user.email)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+        supabase_admin.table("users").insert({
+            "id": str(user.id),
+            "email": user.email,
+            "stripe_customer_id": customer.id,
+        }).execute()
+        return JSONResponse({"has_payment_method": False})
+
+    # Returning user — check for saved card
+    stripe_customer_id = existing.data[0].get("stripe_customer_id")
+    try:
+        pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+        return JSONResponse({"has_payment_method": len(pms.data) > 0})
+    except Exception:
+        return JSONResponse({"has_payment_method": False})
+
 
 # ---------------------------------------------------------------------------
 # Payment endpoints

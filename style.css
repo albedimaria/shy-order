@@ -34,6 +34,34 @@ body {
 
 /* ── Auth ─────────────────────────────────────────────────────────────── */
 
+.google-btn {
+  align-items: center;
+  background: #1a1a1a;
+  border: 1px solid #2e2e2e;
+  border-radius: 8px;
+  color: #d0d0d0;
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 0.88rem;
+  gap: 0.6rem;
+  justify-content: center;
+  max-width: 320px;
+  padding: 10px 14px;
+  text-decoration: none;
+  transition: background 0.15s, border-color 0.15s;
+  width: 100%;
+}
+
+.google-btn:hover { background: #222; border-color: #444; }
+
+.auth-divider {
+  color: #2e2e2e;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .auth-tabs {
   display: flex;
   gap: 0;
