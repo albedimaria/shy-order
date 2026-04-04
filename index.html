@@ -11,12 +11,90 @@
   <div class="logo">Shy Order</div>
   <div class="tagline">essere timidi ha il suo fascino</div>
 
-  <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
+  <div class="scrape-section">
+    <div class="scrape-row">
+      <input
+        type="url"
+        id="restaurant-url"
+        class="scrape-input"
+        placeholder="Incolla il link del ristorante (opzionale)"
+      />
+      <button id="scrape-btn" class="scrape-btn">Cerca</button>
+    </div>
+    <div id="scrape-result" class="scrape-result"></div>
+  </div>
+
+  <div class="arrow-annotation">
+    <span>i know i'm not a designer but it works,<br>trust me i'm an engineer</span>
+    <svg class="arrow-svg" width="24" height="32" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2 L12 26 M12 26 L5 18 M12 26 L19 18" stroke="#666" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </div>
+
+  <div id="widget-container">
+    <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
+  </div>
   <script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
 
   <div class="disclaimer">
     Prenota un tavolo o ordina cibo senza alzare il telefono.
   </div>
+
+  <script>
+    const scrapeBtn = document.getElementById('scrape-btn');
+    const urlInput  = document.getElementById('restaurant-url');
+    const resultDiv = document.getElementById('scrape-result');
+    const widgetContainer = document.getElementById('widget-container');
+
+    const AGENT_ID = 'agent_9901kjyr4vwpeyyr2rc3e37qkncs';
+
+    function rebuildWidget(dynamicVars) {
+      widgetContainer.innerHTML = '';
+      const widget = document.createElement('elevenlabs-convai');
+      widget.setAttribute('agent-id', AGENT_ID);
+      if (dynamicVars) {
+        widget.setAttribute('dynamic-variables', JSON.stringify(dynamicVars));
+      }
+      widgetContainer.appendChild(widget);
+    }
+
+    scrapeBtn.addEventListener('click', async () => {
+      const url = urlInput.value.trim();
+      if (!url) return;
+
+      scrapeBtn.disabled = true;
+      scrapeBtn.textContent = '…';
+      resultDiv.className = 'scrape-result';
+      resultDiv.textContent = '';
+
+      try {
+        const res = await fetch('/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+
+        const parts = [data.name, data.phone_number, data.address, data.hours].filter(Boolean);
+        resultDiv.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
+        resultDiv.classList.add(parts.length ? 'found' : 'empty');
+
+        rebuildWidget({
+          restaurant_name:    data.name         || '',
+          restaurant_phone:   data.phone_number || '',
+          restaurant_address: data.address      || '',
+          restaurant_hours:   data.hours        || '',
+        });
+      } catch (err) {
+        resultDiv.textContent = 'Errore: ' + err.message;
+        resultDiv.classList.add('error');
+      } finally {
+        scrapeBtn.disabled = false;
+        scrapeBtn.textContent = 'Cerca';
+      }
+    });
+  </script>
 
 </body>
 </html>

@@ -1,10 +1,13 @@
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
+import requests as _requests
 import uvicorn
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
@@ -12,6 +15,7 @@ from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInt
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -164,6 +168,84 @@ def css() -> FileResponse:
 @app.get("/health")
 def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+class ScrapeRequest(BaseModel):
+    url: str
+
+
+def _scrape_name(soup: BeautifulSoup) -> str | None:
+    og = soup.find("meta", property="og:title")
+    if og and og.get("content"):
+        return og["content"].strip()
+    if soup.title and soup.title.string:
+        return soup.title.string.strip()
+    h1 = soup.find("h1")
+    if h1:
+        return h1.get_text(strip=True)
+    return None
+
+
+def _scrape_phone(soup: BeautifulSoup) -> str | None:
+    tel_link = soup.find("a", href=re.compile(r"^tel:"))
+    if tel_link:
+        return tel_link["href"].replace("tel:", "").strip()
+    text = soup.get_text(" ")
+    for pattern in [
+        r"\+39[\s\-\.]?\d{2,4}[\s\-\.]?\d{4,8}",
+        r"\b0\d{1,3}[\s\-\.]?\d{6,8}\b",
+        r"\b3\d{2}[\s\-\.]?\d{6,7}\b",
+    ]:
+        m = re.search(pattern, text)
+        if m:
+            return re.sub(r"\s+", " ", m.group()).strip()
+    return None
+
+
+def _scrape_address(soup: BeautifulSoup) -> str | None:
+    el = soup.find(attrs={"itemprop": "streetAddress"})
+    if el:
+        return el.get_text(strip=True)
+    addr = soup.find("address")
+    if addr:
+        return addr.get_text(" ", strip=True)
+    for term in ["address", "indirizzo", "location"]:
+        el = soup.find(class_=re.compile(term, re.I))
+        if el:
+            return el.get_text(" ", strip=True)
+    return None
+
+
+def _scrape_hours(soup: BeautifulSoup) -> str | None:
+    els = soup.find_all(attrs={"itemprop": "openingHours"})
+    if els:
+        return ", ".join(el.get("content") or el.get_text(strip=True) for el in els)
+    for term in ["hours", "orari", "opening"]:
+        el = soup.find(class_=re.compile(term, re.I)) or soup.find(id=re.compile(term, re.I))
+        if el:
+            return el.get_text(" ", strip=True)[:300]
+    return None
+
+
+@app.post("/scrape")
+def scrape(req: ScrapeRequest) -> JSONResponse:
+    try:
+        resp = _requests.get(
+            req.url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ShyOrder/1.0)"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {e}")
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    return JSONResponse({
+        "name":         _scrape_name(soup),
+        "phone_number": _scrape_phone(soup),
+        "address":      _scrape_address(soup),
+        "hours":        _scrape_hours(soup),
+    })
 
 
 @app.post("/tools")
