@@ -172,16 +172,22 @@ def signed_url() -> JSONResponse:
 
     import requests as _requests
     try:
-        resp = _requests.get(
+        resp = _requests.post(
             "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
+            json={"agent_id": AGENT_ID},
             headers={"xi-api-key": api_key},
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
         print(f"[signed-url] ElevenLabs response: {data}", flush=True)
-        return JSONResponse(data)
+        # Map whichever field ElevenLabs returns to the expected "signed_url"
+        signed_url_value = data.get("signed_url") or data.get("token")
+        if not signed_url_value:
+            raise HTTPException(status_code=502, detail=f"Unexpected ElevenLabs response: {data}")
+        return JSONResponse({"signed_url": signed_url_value})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
