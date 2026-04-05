@@ -59,7 +59,7 @@
       <div id="scrape-result" class="scrape-result"></div>
     </div>
 
-    <p class="arrow-annotation">FIND THE WIDGET AND CLICK IT</p>
+    <p id="widget-hint" class="arrow-annotation"></p>
 
     <p id="no-data-hint" class="no-data-hint"></p>
 
@@ -76,6 +76,7 @@
       it: {
         langName:       'italiano',
         tagline:        'essere timidi ha il suo fascino',
+        widgetHint:     'TROVA IL WIDGET E CLICCALO',
         googleBtn:      'Continua con Google',
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
@@ -91,6 +92,7 @@
       en: {
         langName:       'english',
         tagline:        'being shy has its charm',
+        widgetHint:     'FIND THE WIDGET AND CLICK IT',
         googleBtn:      'Continue with Google',
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
@@ -106,6 +108,7 @@
       es: {
         langName:       'español',
         tagline:        'ser tímido tiene su encanto',
+        widgetHint:     'ENCUENTRA EL WIDGET Y HAZ CLIC',
         googleBtn:      'Continuar con Google',
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
@@ -140,6 +143,7 @@
       document.getElementById('payment-sub').textContent      = t.paymentSub;
       document.getElementById('save-card-btn').textContent    = t.saveCard;
       document.getElementById('restaurant-url').placeholder   = t.scrapeInput;
+      document.getElementById('widget-hint').textContent       = t.widgetHint;
       document.getElementById('no-data-hint').textContent     = t.noDataHint;
       document.getElementById('logout-btn').textContent       = t.logout;
       document.getElementById('disclaimer').textContent       = t.disclaimer;
