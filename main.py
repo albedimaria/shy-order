@@ -668,16 +668,26 @@ def scrape(req: ScrapeRequest) -> JSONResponse:
 # Tools webhook
 # ---------------------------------------------------------------------------
 
+def _run_tool(tool_name: str, parameters: dict) -> JSONResponse:
+    handler = TOOL_REGISTRY.get(tool_name)
+    if handler is None:
+        raise HTTPException(status_code=404, detail=f"Unknown tool: '{tool_name}'")
+    return JSONResponse(handler(parameters))
+
+
 @app.post("/tools")
 async def tools_webhook(payload: dict) -> JSONResponse:
     tool_name = payload.get("tool_name")
     parameters = payload.get("parameters", {})
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
-    handler = TOOL_REGISTRY.get(tool_name)
-    if handler is None:
-        raise HTTPException(status_code=404, detail=f"Unknown tool: '{tool_name}'")
-    return JSONResponse(handler(parameters))
+    return _run_tool(tool_name, parameters)
+
+
+@app.post("/tools/{tool_name}")
+async def tools_by_path(tool_name: str, payload: dict = {}) -> JSONResponse:
+    parameters = payload.get("parameters", payload)
+    return _run_tool(tool_name, parameters)
 
 # ---------------------------------------------------------------------------
 # Entry points
