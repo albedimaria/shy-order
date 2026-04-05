@@ -157,10 +157,11 @@
 
     function displayNameFromToken(t) {
       const p = parseJwt(t);
-      return p?.user_metadata?.full_name
-          || p?.user_metadata?.name
-          || p?.email
-          || '';
+      const raw = p?.user_metadata?.full_name
+               || p?.user_metadata?.name
+               || p?.email
+               || '';
+      return raw.split(/\s+/)[0];
     }
 
     // ── Language ───────────────────────────────────────────────────────────────
