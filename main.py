@@ -353,20 +353,22 @@ def auth_callback() -> HTMLResponse:
 <script>
 const hash = new URLSearchParams(window.location.hash.slice(1));
 const token = hash.get('access_token');
+const FRONTEND = 'https://shy-order.vercel.app';
+const BACKEND  = 'https://shy-order-production.up.railway.app';
 if (!token) {
-  window.location.href = '/?error=no_token';
+  window.location.href = FRONTEND + '/?error=no_token';
 } else {
-  fetch('/auth/google-complete', {
+  fetch(BACKEND + '/auth/google-complete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }
   })
   .then(r => r.json())
   .then(d => {
-    window.location.href = '/?token=' + encodeURIComponent(token)
+    window.location.href = FRONTEND + '/?token=' + encodeURIComponent(token)
       + '&has_payment=' + (d.has_payment_method ? '1' : '0');
   })
   .catch(() => {
-    window.location.href = '/?token=' + encodeURIComponent(token) + '&has_payment=0';
+    window.location.href = FRONTEND + '/?token=' + encodeURIComponent(token) + '&has_payment=0';
   });
 }
 </script>
