@@ -23,9 +23,9 @@
     <button id="logout-btn" class="logout-btn hidden"></button>
   </div>
 
-  <div class="logo">Shy Order</div>
+  <div id="logo" class="logo">Shy Order</div>
+  <div id="greeting" class="greeting hidden"></div>
   <div id="tagline" class="tagline"></div>
-  <div id="subtagline" class="subtagline hidden"></div>
 
   <!-- ── Auth screen ─────────────────────────────────────────── -->
   <div id="screen-auth" class="screen hidden">
@@ -81,7 +81,7 @@
       it: {
         langName:       'italiano',
         tagline:        'essere timidi ha il suo fascino',
-        subtagline:     'Prenota un tavolo o ordina cibo senza chiamare davvero.',
+        greeting:       (name) => `ciao ${name}, prenota un tavolo o ordina cibo senza chiamare davvero`,
         actionText:     'Parla con Shy Order',
         startCallText:  'Inizia la chiamata',
         endCallText:    'Termina la chiamata',
@@ -101,7 +101,7 @@
       en: {
         langName:       'english',
         tagline:        'being shy has its charm',
-        subtagline:     'Book a table or order food without actually calling.',
+        greeting:       (name) => `hey ${name}, book a table or order food without actually calling`,
         actionText:     'Talk to Shy Order',
         startCallText:  'Start call',
         endCallText:    'End call',
@@ -121,7 +121,7 @@
       es: {
         langName:       'español',
         tagline:        'ser tímido tiene su encanto',
-        subtagline:     'Reserva una mesa o pide comida sin llamar de verdad.',
+        greeting:       (name) => `hola ${name}, reserva una mesa o pide comida sin llamar de verdad`,
         actionText:     'Habla con Shy Order',
         startCallText:  'Iniciar llamada',
         endCallText:    'Finalizar llamada',
@@ -146,6 +146,7 @@
     let cardElement    = null;
     let restaurantData = {};
     let currentLang    = localStorage.getItem('lang') || 'it';
+    let displayName    = '';
 
     // ── JWT decode (client-side, no library) ───────────────────────────────────
     function parseJwt(t) {
@@ -170,14 +171,14 @@
 
       document.documentElement.lang = lang;
       document.getElementById('tagline').textContent         = t.tagline;
-      document.getElementById('subtagline').textContent      = t.subtagline;
+      if (displayName) document.getElementById('greeting').textContent = t.greeting(displayName);
       document.getElementById('google-btn-text').textContent = t.googleBtn;
       document.getElementById('payment-title').textContent   = t.paymentTitle;
       document.getElementById('payment-sub').textContent     = t.paymentSub;
       document.getElementById('save-card-btn').textContent   = t.saveCard;
       document.getElementById('restaurant-url').placeholder  = t.scrapeInput;
-      document.getElementById('no-data-hint').textContent    = t.noDataHint;
-      document.getElementById('logout-btn').textContent      = t.logout;
+      document.getElementById('no-data-hint').textContent     = t.noDataHint;
+      document.getElementById('logout-btn').textContent       = t.logout;
 
       const scrapeBtn = document.getElementById('scrape-btn');
       if (!scrapeBtn.disabled) scrapeBtn.textContent = t.scrapeBtn;
@@ -209,18 +210,23 @@
     });
 
     // ── Auth state helpers ─────────────────────────────────────────────────────
-    function setLoggedIn(displayName) {
+    function setLoggedIn(name) {
+      displayName = name;
+      document.getElementById('logo').classList.add('hidden');
       document.getElementById('tagline').classList.add('hidden');
-      document.getElementById('subtagline').classList.remove('hidden');
-      document.getElementById('user-name').textContent = displayName;
+      document.getElementById('greeting').textContent = LANGS[currentLang].greeting(name);
+      document.getElementById('greeting').classList.remove('hidden');
+      document.getElementById('user-name').textContent = name;
       ['user-sep', 'user-name', 'logout-sep', 'logout-btn'].forEach(id => {
         document.getElementById(id).classList.remove('hidden');
       });
     }
 
     function setLoggedOut() {
+      displayName = '';
+      document.getElementById('logo').classList.remove('hidden');
       document.getElementById('tagline').classList.remove('hidden');
-      document.getElementById('subtagline').classList.add('hidden');
+      document.getElementById('greeting').classList.add('hidden');
       ['user-sep', 'user-name', 'logout-sep', 'logout-btn'].forEach(id => {
         document.getElementById(id).classList.add('hidden');
       });
