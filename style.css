@@ -2,22 +2,39 @@
 
 body {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1.4rem;
+  gap: 2rem;
   background: #0e0e0e;
   color: #f0f0f0;
   font-family: 'Georgia', serif;
-  padding: 2rem 1rem;
+  padding: 5rem 1.5rem max(2rem, env(safe-area-inset-bottom));
 }
+
+.hidden { display: none !important; }
+
+/* ── Content wrapper ──────────────────────────────────────────────────── */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
+  width: 100%;
+  max-width: 480px;
+}
+
+/* ── Logo / greeting ──────────────────────────────────────────────────── */
 
 .logo {
   font-size: 3rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: #ffffff;
+  text-align: center;
 }
 
 .greeting {
@@ -27,7 +44,6 @@ body {
   font-weight: 400;
   letter-spacing: 0.01em;
   line-height: 1.4;
-  max-width: 480px;
   text-align: center;
 }
 
@@ -36,19 +52,19 @@ body {
   color: #888;
   font-style: italic;
   letter-spacing: 0.02em;
+  text-align: center;
 }
 
-.hidden { display: none !important; }
+/* ── Top-left: language switcher ──────────────────────────────────────── */
 
-/* ── Top bar (language + user + logout) ───────────────────────────────── */
-
-.top-bar {
+.top-bar-left {
   position: fixed;
   top: 1rem;
-  right: 1.2rem;
+  left: 1.2rem;
   display: flex;
   align-items: center;
   gap: 0.3rem;
+  z-index: 100;
 }
 
 .lang-btn {
@@ -63,27 +79,85 @@ body {
   transition: color 0.15s;
 }
 
-.lang-btn:hover { color: #888; }
+.lang-btn:hover  { color: #888; }
 .lang-btn.active { color: #f0f0f0; }
 
 .lang-sep {
   color: #2e2e2e;
   font-size: 1.125rem;
+  user-select: none;
 }
 
-.user-name {
-  color: #555;
-  font-size: 1.125rem;
-  font-style: italic;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* ── Top-right: profile icon + dropdown ───────────────────────────────── */
+
+.top-bar-right {
+  position: fixed;
+  top: 0.85rem;
+  right: 1.2rem;
+  z-index: 100;
 }
+
+.profile-btn {
+  background: none;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem;
+  transition: color 0.15s;
+}
+
+.profile-btn:hover { color: #888; }
+
+.profile-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  background: #1a1a1a;
+  border: 1px solid #2e2e2e;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
+.dropdown-name {
+  color: #555;
+  font-size: 0.875rem;
+  font-style: italic;
+  padding: 0.6rem 1rem 0.4rem;
+  user-select: none;
+}
+
+.dropdown-logout {
+  background: none;
+  border: none;
+  border-top: 1px solid #222;
+  color: #aaa;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 0.55rem 1rem;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+.dropdown-logout:hover { background: #222; color: #f0f0f0; }
 
 /* ── Screens ──────────────────────────────────────────────────────────── */
 
-.screen { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 0.8rem; }
+.screen {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
 .screen.hidden { display: none; }
 
 /* ── Auth ─────────────────────────────────────────────────────────────── */
@@ -100,7 +174,6 @@ body {
   font-size: 1.65rem;
   gap: 0.6rem;
   justify-content: center;
-  max-width: 360px;
   padding: 10px 14px;
   text-decoration: none;
   transition: background 0.15s, border-color 0.15s;
@@ -109,21 +182,13 @@ body {
 
 .google-btn:hover { background: #222; border-color: #444; }
 
-.auth-input {
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 8px;
-  color: #f0f0f0;
-  font-family: inherit;
-  font-size: 1.65rem;
-  outline: none;
-  padding: 10px 14px;
-  transition: border-color 0.2s;
-  width: 100%;
+.form-error {
+  color: #a55;
+  font-size: 1.4625rem;
+  font-style: italic;
+  min-height: 1rem;
+  text-align: center;
 }
-
-.auth-input::placeholder { color: #444; }
-.auth-input:focus { border-color: #555; }
 
 /* ── Shared button styles ─────────────────────────────────────────────── */
 
@@ -142,14 +207,6 @@ body {
 
 .primary-btn:hover:not(:disabled) { background: #e0e0e0; }
 .primary-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-.form-error {
-  color: #a55;
-  font-size: 1.4625rem;
-  font-style: italic;
-  min-height: 1rem;
-  text-align: center;
-}
 
 /* ── Payment setup ────────────────────────────────────────────────────── */
 
@@ -172,10 +229,7 @@ body {
   border-radius: 8px;
   padding: 12px 14px;
   width: 100%;
-  max-width: 360px;
 }
-
-#screen-payment .primary-btn { max-width: 360px; margin-top: 0.2rem; }
 
 /* ── Scrape section ───────────────────────────────────────────────────── */
 
@@ -185,7 +239,6 @@ body {
   align-items: center;
   gap: 0.5rem;
   width: 100%;
-  max-width: 480px;
 }
 
 .scrape-row {
@@ -205,6 +258,7 @@ body {
   outline: none;
   padding: 10px 14px;
   transition: border-color 0.2s;
+  min-width: 0;
 }
 
 .scrape-input::placeholder { color: #444; }
@@ -238,37 +292,13 @@ body {
 .scrape-result.empty { color: #444; }
 .scrape-result.error { color: #a55; }
 
-/* ── No-data hint ─────────────────────────────────────────────────────── */
+/* ── No-data hint — pushed toward widget with extra top margin ────────── */
 
 .no-data-hint {
   color: #555;
   font-size: 1.3125rem;
   font-style: italic;
   line-height: 1.5;
-  max-width: 400px;
-  text-align: center;
-}
-
-/* ── Logout ───────────────────────────────────────────────────────────── */
-
-.logout-btn {
-  background: none;
-  border: none;
-  color: #444;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 1.125rem;
-  letter-spacing: 0.06em;
-  padding: 0.1rem 0.2rem;
-  transition: color 0.15s;
-}
-
-.logout-btn:hover { color: #888; }
-
-/* ── Disclaimer ───────────────────────────────────────────────────────── */
-
-.disclaimer {
-  color: #444;
-  font-size: 1.5rem;
+  margin-top: 2rem;
   text-align: center;
 }

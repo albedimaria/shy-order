@@ -10,70 +10,85 @@
 </head>
 <body>
 
-  <!-- ── Top bar: language switcher + user info ─────────────── -->
-  <div class="top-bar">
+  <!-- ── Top-left: language switcher ──────────────────────────── -->
+  <div class="top-bar-left">
     <button class="lang-btn" data-lang="it">IT</button>
     <span class="lang-sep">·</span>
     <button class="lang-btn" data-lang="en">EN</button>
     <span class="lang-sep">·</span>
     <button class="lang-btn" data-lang="es">ES</button>
-    <span id="user-sep" class="lang-sep hidden">·</span>
-    <span id="user-name" class="user-name hidden"></span>
-    <span id="logout-sep" class="lang-sep hidden">·</span>
-    <button id="logout-btn" class="logout-btn hidden"></button>
   </div>
 
-  <div id="logo" class="logo">Shy Order</div>
-  <div id="greeting" class="greeting hidden"></div>
-  <div id="tagline" class="tagline"></div>
-
-  <!-- ── Auth screen ─────────────────────────────────────────── -->
-  <div id="screen-auth" class="screen hidden">
-    <a href="https://shy-order-production.up.railway.app/auth/google" class="google-btn">
-      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615Z" fill="#4285F4"/>
-        <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18Z" fill="#34A853"/>
-        <path d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332Z" fill="#FBBC05"/>
-        <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.961L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58Z" fill="#EA4335"/>
+  <!-- ── Top-right: profile icon + dropdown ───────────────────── -->
+  <div class="top-bar-right hidden" id="profile-area">
+    <button class="profile-btn" id="profile-btn" aria-label="Account">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="8" r="4"/>
+        <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
       </svg>
-      <span id="google-btn-text"></span>
-    </a>
-    <p id="auth-error" class="form-error"></p>
+    </button>
+    <div class="profile-dropdown hidden" id="profile-dropdown">
+      <span class="dropdown-name" id="dropdown-name"></span>
+      <button id="logout-btn" class="dropdown-logout"></button>
+    </div>
   </div>
 
-  <!-- ── Payment setup screen ───────────────────────────────── -->
-  <div id="screen-payment" class="screen hidden">
-    <p id="payment-title" class="section-title"></p>
-    <p id="payment-sub" class="section-sub"></p>
-    <div id="card-element" class="card-element"></div>
-    <button id="save-card-btn" class="primary-btn"></button>
-    <p id="payment-error" class="form-error"></p>
-  </div>
+  <!-- ── Page content ──────────────────────────────────────────── -->
+  <div class="content">
 
-  <!-- ── Main screen ────────────────────────────────────────── -->
-  <div id="screen-main" class="screen hidden">
-    <div class="scrape-section">
-      <div class="scrape-row">
-        <input
-          type="url"
-          id="restaurant-url"
-          class="scrape-input"
-        />
-        <button id="scrape-btn" class="scrape-btn"></button>
-      </div>
-      <div id="scrape-result" class="scrape-result"></div>
+    <div id="logo" class="logo">Shy Order</div>
+    <div id="greeting" class="greeting hidden"></div>
+    <div id="tagline" class="tagline"></div>
+
+    <!-- ── Auth screen ─────────────────────────────────────────── -->
+    <div id="screen-auth" class="screen hidden">
+      <a href="https://shy-order-production.up.railway.app/auth/google" class="google-btn">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615Z" fill="#4285F4"/>
+          <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18Z" fill="#34A853"/>
+          <path d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332Z" fill="#FBBC05"/>
+          <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.961L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58Z" fill="#EA4335"/>
+        </svg>
+        <span id="google-btn-text"></span>
+      </a>
+      <p id="auth-error" class="form-error"></p>
     </div>
 
-    <p id="no-data-hint" class="no-data-hint"></p>
+    <!-- ── Payment setup screen ───────────────────────────────── -->
+    <div id="screen-payment" class="screen hidden">
+      <p id="payment-title" class="section-title"></p>
+      <p id="payment-sub" class="section-sub"></p>
+      <div id="card-element" class="card-element"></div>
+      <button id="save-card-btn" class="primary-btn"></button>
+      <p id="payment-error" class="form-error"></p>
+    </div>
 
-    <elevenlabs-convai
-      agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"
-      avatar-orb-color-1="#1a1a1a"
-      avatar-orb-color-2="#444444"
-      mic-muting="true"
-      transcript="true"
-    ></elevenlabs-convai>
-  </div>
+    <!-- ── Main screen ────────────────────────────────────────── -->
+    <div id="screen-main" class="screen hidden">
+      <div class="scrape-section">
+        <div class="scrape-row">
+          <input
+            type="url"
+            id="restaurant-url"
+            class="scrape-input"
+          />
+          <button id="scrape-btn" class="scrape-btn"></button>
+        </div>
+        <div id="scrape-result" class="scrape-result"></div>
+      </div>
+
+      <p id="no-data-hint" class="no-data-hint"></p>
+
+      <elevenlabs-convai
+        agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"
+        avatar-orb-color-1="#1a1a1a"
+        avatar-orb-color-2="#444444"
+        mic-muting="true"
+        transcript="true"
+      ></elevenlabs-convai>
+    </div>
+
+  </div><!-- /.content -->
 
   <script type="module">
     // ── Translations ───────────────────────────────────────────────────────────
@@ -91,7 +106,7 @@
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
         saveCard:       'Salva carta',
-        scrapeInput:    'incolla il link del ristorante (es. TheFork, Tripadvisor, sito ufficiale)',
+        scrapeInput:    'incolla il link del ristorante',
         scrapeBtn:      'Cerca',
         noDataHint:     '💡 Suggerimento: prima di iniziare, tieni a portata di mano il numero di telefono e l\'indirizzo del ristorante.',
         logout:         'Esci',
@@ -111,7 +126,7 @@
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
         saveCard:       'Save card',
-        scrapeInput:    'paste the restaurant link here (e.g. TheFork, Tripadvisor, official website)',
+        scrapeInput:    'paste the restaurant link here',
         scrapeBtn:      'Search',
         noDataHint:     '💡 Tip: before starting, have the restaurant\'s phone number and address handy.',
         logout:         'Logout',
@@ -131,7 +146,7 @@
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
         saveCard:       'Guardar tarjeta',
-        scrapeInput:    'pega aquí el enlace del restaurante (p. ej. TheFork, Tripadvisor, web oficial)',
+        scrapeInput:    'pega aquí el enlace del restaurante',
         scrapeBtn:      'Buscar',
         noDataHint:     '💡 Sugerencia: antes de empezar, ten a mano el número de teléfono y la dirección del restaurante.',
         logout:         'Salir',
@@ -148,19 +163,15 @@
     let currentLang    = localStorage.getItem('lang') || 'it';
     let displayName    = '';
 
-    // ── JWT decode (client-side, no library) ───────────────────────────────────
+    // ── JWT decode ─────────────────────────────────────────────────────────────
     function parseJwt(t) {
-      try {
-        return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      } catch (_) { return {}; }
+      try { return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); }
+      catch (_) { return {}; }
     }
 
     function displayNameFromToken(t) {
       const p = parseJwt(t);
-      const raw = p?.user_metadata?.full_name
-               || p?.user_metadata?.name
-               || p?.email
-               || '';
+      const raw = p?.user_metadata?.full_name || p?.user_metadata?.name || p?.email || '';
       return raw.split(/\s+/)[0];
     }
 
@@ -178,8 +189,8 @@
       document.getElementById('payment-sub').textContent     = t.paymentSub;
       document.getElementById('save-card-btn').textContent   = t.saveCard;
       document.getElementById('restaurant-url').placeholder  = t.scrapeInput;
-      document.getElementById('no-data-hint').textContent     = t.noDataHint;
-      document.getElementById('logout-btn').textContent       = t.logout;
+      document.getElementById('no-data-hint').textContent    = t.noDataHint;
+      document.getElementById('logout-btn').textContent      = t.logout;
 
       const scrapeBtn = document.getElementById('scrape-btn');
       if (!scrapeBtn.disabled) scrapeBtn.textContent = t.scrapeBtn;
@@ -210,17 +221,25 @@
       btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
     });
 
-    // ── Auth state helpers ─────────────────────────────────────────────────────
+    // ── Profile dropdown ───────────────────────────────────────────────────────
+    document.getElementById('profile-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('profile-dropdown').classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => {
+      document.getElementById('profile-dropdown').classList.add('hidden');
+    });
+
+    // ── Auth state ─────────────────────────────────────────────────────────────
     function setLoggedIn(name) {
       displayName = name;
       document.getElementById('logo').classList.add('hidden');
       document.getElementById('tagline').classList.add('hidden');
       document.getElementById('greeting').textContent = LANGS[currentLang].greeting(name);
       document.getElementById('greeting').classList.remove('hidden');
-      document.getElementById('user-name').textContent = name;
-      ['user-sep', 'user-name', 'logout-sep', 'logout-btn'].forEach(id => {
-        document.getElementById(id).classList.remove('hidden');
-      });
+      document.getElementById('dropdown-name').textContent = name;
+      document.getElementById('profile-area').classList.remove('hidden');
     }
 
     function setLoggedOut() {
@@ -228,9 +247,8 @@
       document.getElementById('logo').classList.remove('hidden');
       document.getElementById('tagline').classList.remove('hidden');
       document.getElementById('greeting').classList.add('hidden');
-      ['user-sep', 'user-name', 'logout-sep', 'logout-btn'].forEach(id => {
-        document.getElementById(id).classList.add('hidden');
-      });
+      document.getElementById('profile-area').classList.add('hidden');
+      document.getElementById('profile-dropdown').classList.add('hidden');
     }
 
     // ── Screens ────────────────────────────────────────────────────────────────
@@ -265,17 +283,12 @@
       const errEl = document.getElementById('payment-error');
       btn.disabled = true;
       errEl.textContent = '';
-
       try {
         const res = await api('/payment/setup', { method: 'POST' });
         const { client_secret } = await res.json();
         if (!res.ok) throw new Error(client_secret || 'Errore');
-
-        const result = await stripeObj.confirmCardSetup(client_secret, {
-          payment_method: { card: cardElement },
-        });
+        const result = await stripeObj.confirmCardSetup(client_secret, { payment_method: { card: cardElement } });
         if (result.error) throw new Error(result.error.message);
-
         showScreen('main');
       } catch (err) {
         errEl.textContent = err.message;
