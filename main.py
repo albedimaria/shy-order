@@ -329,51 +329,14 @@ def auth_login(req: LoginRequest) -> JSONResponse:
 def auth_google(request: Request) -> RedirectResponse:
     if not supabase_admin:
         raise HTTPException(status_code=503, detail="Supabase not configured")
-    base_url = str(request.base_url).rstrip("/")
-    # Use Supabase's authorize endpoint directly (implicit flow — no code verifier needed)
+    # Supabase sends the token as a hash fragment directly to the frontend
     oauth_url = (
         f"{_supabase_url}/auth/v1/authorize"
         f"?provider=google"
-        f"&redirect_to={base_url}/auth/callback"
+        f"&redirect_to=https://shy-order.vercel.app"
     )
     return RedirectResponse(url=oauth_url)
 
-
-@app.get("/auth/callback")
-def auth_callback() -> HTMLResponse:
-    """
-    Supabase redirects here with #access_token=... in the URL fragment.
-    Serve a minimal page that reads the fragment, syncs the user with Stripe,
-    then forwards to the main app with ?token=...&has_payment=...
-    """
-    html = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"/><title>Accesso…</title></head>
-<body style="background:#0e0e0e;color:#666;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-<p>Accesso in corso…</p>
-<script>
-const hash = new URLSearchParams(window.location.hash.slice(1));
-const token = hash.get('access_token');
-const FRONTEND = 'https://shy-order.vercel.app';
-const BACKEND  = 'https://shy-order-production.up.railway.app';
-if (!token) {
-  window.location.href = FRONTEND + '/?error=no_token';
-} else {
-  fetch(BACKEND + '/auth/google-complete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }
-  })
-  .then(r => r.json())
-  .then(d => {
-    window.location.href = FRONTEND + '/?token=' + encodeURIComponent(token)
-      + '&has_payment=' + (d.has_payment_method ? '1' : '0');
-  })
-  .catch(() => {
-    window.location.href = FRONTEND + '/?token=' + encodeURIComponent(token) + '&has_payment=0';
-  });
-}
-</script>
-</body></html>"""
-    return HTMLResponse(content=html)
 
 
 @app.post("/auth/google-complete")

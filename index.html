@@ -252,25 +252,26 @@
 
     // ── Init ───────────────────────────────────────────────────────────────────
     async function init() {
-      // Handle redirect back from Google OAuth (/auth/callback → /?token=...&has_payment=...)
-      const params = new URLSearchParams(window.location.search);
-      const urlToken    = params.get('token');
-      const hasPayment  = params.get('has_payment');
-      const oauthError  = params.get('error');
+      // Handle redirect back from Supabase OAuth — token arrives as a hash fragment
+      const hash = new URLSearchParams(window.location.hash.slice(1));
+      const hashToken = hash.get('access_token');
 
-      if (urlToken) {
-        token = urlToken;
-        localStorage.setItem('sb_token', token);
+      if (hashToken) {
         window.history.replaceState({}, '', '/');
-        if (hasPayment === '1') { showScreen('main'); }
-        else { await initStripe(); showScreen('payment'); }
-        return;
-      }
-
-      if (oauthError) {
-        window.history.replaceState({}, '', '/');
-        document.getElementById('auth-error').textContent = 'Errore durante il login con Google.';
-        showScreen('auth');
+        try {
+          const res = await api('/auth/google-complete', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${hashToken}` },
+          });
+          const d = await res.json();
+          token = hashToken;
+          localStorage.setItem('sb_token', token);
+          if (d.has_payment_method) { showScreen('main'); }
+          else { await initStripe(); showScreen('payment'); }
+        } catch (_) {
+          document.getElementById('auth-error').textContent = 'Errore durante il login con Google.';
+          showScreen('auth');
+        }
         return;
       }
 
