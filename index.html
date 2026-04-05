@@ -51,7 +51,9 @@
       <div id="scrape-result" class="scrape-result"></div>
     </div>
 
-    <p class="arrow-annotation">it always appears where it wants...<br>damn widget, always a step ahead (and right) to me</p>
+    <p class="arrow-annotation">FIND THE WIDGET AND CLICK IT</p>
+
+    <p id="no-data-hint" class="no-data-hint">💡 Suggerimento: prima di iniziare, tieni a portata di mano il numero di telefono e l'indirizzo del ristorante.</p>
 
     <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
 
@@ -59,14 +61,15 @@
   </div>
 
   <div class="disclaimer">
-    Prenota un tavolo o ordina cibo senza alzare il telefono.
+    prenota un tavolo o ordina cibo senza chiamare davvero
   </div>
 
   <script type="module">
     // ── State ──────────────────────────────────────────────────────────────────
-    let token       = localStorage.getItem('sb_token');
-    let stripeObj   = null;
-    let cardElement = null;
+    let token          = localStorage.getItem('sb_token');
+    let stripeObj      = null;
+    let cardElement    = null;
+    let restaurantData = {};
 
     // ── Screens ────────────────────────────────────────────────────────────────
     function showScreen(name) {
@@ -137,10 +140,11 @@
       try {
         const res = await api('/scrape', { method: 'POST', body: JSON.stringify({ url }) });
         if (!res.ok) throw new Error(await res.text());
-        const restaurantData = await res.json();
+        restaurantData = await res.json();
         const parts = [restaurantData.name, restaurantData.phone_number, restaurantData.address, restaurantData.hours].filter(Boolean);
         result.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
         result.classList.add(parts.length ? 'found' : 'empty');
+        document.getElementById('no-data-hint').hidden = parts.length > 0;
       } catch (err) {
         result.textContent = 'Errore: ' + err.message;
         result.classList.add('error');
