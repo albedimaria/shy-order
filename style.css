@@ -27,9 +27,18 @@ body {
   letter-spacing: 0.02em;
 }
 
-/* ── Language switcher ────────────────────────────────────────────────── */
+.subtagline {
+  color: #555;
+  font-size: 0.9rem;
+  font-style: italic;
+  text-align: center;
+}
 
-.lang-switcher {
+.hidden { display: none !important; }
+
+/* ── Top bar (language + user + logout) ───────────────────────────────── */
+
+.top-bar {
   position: fixed;
   top: 1rem;
   right: 1.2rem;
@@ -56,6 +65,16 @@ body {
 .lang-sep {
   color: #2e2e2e;
   font-size: 0.75rem;
+}
+
+.user-name {
+  color: #555;
+  font-size: 0.75rem;
+  font-style: italic;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Screens ──────────────────────────────────────────────────────────── */
@@ -335,17 +354,16 @@ body {
 .logout-btn {
   background: none;
   border: none;
-  color: #333;
+  color: #444;
   cursor: pointer;
   font-family: inherit;
-  font-size: 0.9375rem;
-  letter-spacing: 0.02em;
-  margin-top: 0.4rem;
-  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.2rem;
   transition: color 0.15s;
 }
 
-.logout-btn:hover { color: #666; }
+.logout-btn:hover { color: #888; }
 
 /* ── Disclaimer ───────────────────────────────────────────────────────── */
 
