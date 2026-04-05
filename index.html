@@ -6,6 +6,7 @@
   <title>Shy Order</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://js.stripe.com/v3/"></script>
+  <script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
 </head>
 <body>
 
@@ -51,17 +52,13 @@
     </div>
 
     <div class="arrow-annotation">
-      <span>i know i'm not a designer but it works,<br>trust me i'm an engineer</span>
+      <span>it always appears where it wants...<br>damn widget, always a step ahead (and right) to me</span>
       <svg class="arrow-svg" width="16" height="24" viewBox="0 0 16 24" fill="none">
         <path d="M8 2 L8 20 M8 20 L3 14 M8 20 L13 14" stroke="#444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </div>
 
-    <button id="call-btn" class="call-btn" aria-label="Avvia conversazione">
-      <span class="btn-icon">🎙</span>
-    </button>
-    <span id="btn-status" class="btn-status"></span>
-    <p id="session-cost" class="session-cost"></p>
+    <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
 
     <button id="logout-btn" class="logout-btn">Esci</button>
   </div>
@@ -71,16 +68,10 @@
   </div>
 
   <script type="module">
-    import { Conversation } from 'https://esm.sh/@11labs/client';
-
     // ── State ──────────────────────────────────────────────────────────────────
-    let token         = localStorage.getItem('sb_token');
-    let stripeObj     = null;
-    let cardElement   = null;
-    let conversation  = null;
-    let sessionId     = null;
-    let sessionStart  = null;
-    let restaurantData = {};
+    let token       = localStorage.getItem('sb_token');
+    let stripeObj   = null;
+    let cardElement = null;
 
     // ── Screens ────────────────────────────────────────────────────────────────
     function showScreen(name) {
@@ -151,7 +142,7 @@
       try {
         const res = await api('/scrape', { method: 'POST', body: JSON.stringify({ url }) });
         if (!res.ok) throw new Error(await res.text());
-        restaurantData = await res.json();
+        const restaurantData = await res.json();
         const parts = [restaurantData.name, restaurantData.phone_number, restaurantData.address, restaurantData.hours].filter(Boolean);
         result.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
         result.classList.add(parts.length ? 'found' : 'empty');
@@ -161,85 +152,6 @@
       } finally {
         btn.disabled = false;
         btn.textContent = 'Cerca';
-      }
-    });
-
-    // ── Session / mic ──────────────────────────────────────────────────────────
-    const callBtn    = document.getElementById('call-btn');
-    const btnStatus  = document.getElementById('btn-status');
-    const costEl     = document.getElementById('session-cost');
-
-    function setCallState(state) {
-      callBtn.dataset.state = state;
-      const labels = { idle: '', connecting: 'connessione…', listening: 'ti ascolto…', speaking: 'rispondo…' };
-      btnStatus.textContent = labels[state] ?? '';
-    }
-
-    callBtn.addEventListener('click', async () => {
-      if (conversation) {
-        await conversation.endSession();
-        return;
-      }
-
-      setCallState('connecting');
-      callBtn.disabled = true;
-      costEl.textContent = '';
-
-      try {
-        const res  = await api('/session/start', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Errore avvio sessione');
-
-        sessionId = data.session_id;
-
-        const dynVars = {};
-        if (restaurantData.name)         dynVars.restaurant_name    = restaurantData.name;
-        if (restaurantData.phone_number)  dynVars.restaurant_phone   = restaurantData.phone_number;
-        if (restaurantData.address)       dynVars.restaurant_address = restaurantData.address;
-        if (restaurantData.hours)         dynVars.restaurant_hours   = restaurantData.hours;
-
-        conversation = await Conversation.startSession({
-          signedUrl: data.signed_url,
-          ...(Object.keys(dynVars).length && { dynamicVariables: dynVars }),
-          onConnect: () => {
-            sessionStart = Date.now();
-            callBtn.disabled = false;
-            setCallState('listening');
-          },
-          onDisconnect: async () => {
-            const duration = sessionStart ? Math.round((Date.now() - sessionStart) / 1000) : 0;
-            conversation = null;
-            sessionStart = null;
-            setCallState('idle');
-            if (sessionId && duration > 0) {
-              try {
-                const r = await api('/session/end', {
-                  method: 'POST',
-                  body: JSON.stringify({ session_id: sessionId, duration_seconds: duration }),
-                });
-                const d = await r.json();
-                if (r.ok && d.amount_charged) {
-                  const euros = (d.amount_charged / 100).toFixed(2).replace('.', ',');
-                  costEl.textContent = `Sessione terminata · €${euros} addebitati`;
-                }
-              } catch (_) {}
-              sessionId = null;
-            }
-          },
-          onModeChange: ({ mode }) => {
-            if (conversation) setCallState(mode === 'speaking' ? 'speaking' : 'listening');
-          },
-          onError: (err) => {
-            console.error('[shy-order] session error:', err);
-            conversation = null;
-            setCallState('idle');
-            callBtn.disabled = false;
-          },
-        });
-      } catch (err) {
-        console.error('[shy-order]', err);
-        setCallState('idle');
-        callBtn.disabled = false;
       }
     });
 
