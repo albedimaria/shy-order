@@ -152,16 +152,8 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
         return {"found": False}
     if not isinstance(data, list):
         return {"found": False}
-    def _matches(db_name: str) -> bool:
-        db_lower = db_name.strip().lower()
-        if db_lower == name_query:
-            return True
-        query_words = set(name_query.split())
-        db_words    = set(db_lower.split())
-        return query_words <= db_words or db_words <= query_words
-
     for restaurant in data:
-        if isinstance(restaurant, dict) and _matches(restaurant.get("name", "")):
+        if isinstance(restaurant, dict) and restaurant.get("name", "").strip().lower() == name_query:
             return {
                 "found": True,
                 "name": restaurant["name"],
