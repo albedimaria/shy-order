@@ -96,7 +96,7 @@
       it: {
         langName:       'italiano',
         tagline:        'essere timidi ha il suo fascino',
-        greeting:       (name) => `ciao ${name}, <br>prenota un tavolo o ordina cibo senza chiamare davvero`,
+        greeting:       (name) => `ciao ${name},\nprenota un tavolo o ordina cibo senza chiamare davvero`,
         actionText:     'Parla con Shy Order',
         startCallText:  'Inizia la chiamata',
         endCallText:    'Termina la chiamata',
@@ -116,7 +116,8 @@
       en: {
         langName:       'english',
         tagline:        'being shy has its charm',
-        greeting: (name) => `hey ${name},<br>book a table or order food without actually calling`,        actionText:     'Talk to Shy Order',
+        greeting:       (name) => `hey ${name},\nbook a table or order food without actually calling`,
+        actionText:     'Talk to Shy Order',
         startCallText:  'Start call',
         endCallText:    'End call',
         listeningText:  'Listening…',
@@ -135,7 +136,7 @@
       es: {
         langName:       'español',
         tagline:        'ser tímido tiene su encanto',
-        greeting:       (name) => `hola ${name}, <br>reserva una mesa o pide comida sin llamar de verdad`,
+        greeting:       (name) => `hola ${name},\nreserva una mesa o pide comida sin llamar de verdad`,
         actionText:     'Habla con Shy Order',
         startCallText:  'Iniciar llamada',
         endCallText:    'Finalizar llamada',
@@ -182,7 +183,7 @@
 
       document.documentElement.lang = lang;
       document.getElementById('tagline').textContent         = t.tagline;
-      if (displayName) document.getElementById('greeting').innerHTML = t.greeting(displayName);
+      if (displayName) document.getElementById('greeting').textContent = t.greeting(displayName);
       document.getElementById('google-btn-text').textContent = t.googleBtn;
       document.getElementById('payment-title').textContent   = t.paymentTitle;
       document.getElementById('payment-sub').textContent     = t.paymentSub;
@@ -235,7 +236,7 @@
       displayName = name;
       document.getElementById('logo').classList.add('hidden');
       document.getElementById('tagline').classList.add('hidden');
-      document.getElementById('greeting').innerHTML = LANGS[currentLang].greeting(name);
+      document.getElementById('greeting').textContent = LANGS[currentLang].greeting(name);
       document.getElementById('greeting').classList.remove('hidden');
       document.getElementById('dropdown-name').textContent = name;
       document.getElementById('profile-area').classList.remove('hidden');

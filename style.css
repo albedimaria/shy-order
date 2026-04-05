@@ -45,6 +45,7 @@ body {
   letter-spacing: 0.01em;
   line-height: 1.4;
   text-align: center;
+  white-space: pre-line;
 }
 
 .tagline {
