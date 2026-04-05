@@ -6,7 +6,7 @@
   <title>Shy Order</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://js.stripe.com/v3/"></script>
-  <script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
+  <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
 </head>
 <body>
 
@@ -63,7 +63,13 @@
 
     <p id="no-data-hint" class="no-data-hint"></p>
 
-    <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
+    <elevenlabs-convai
+      agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"
+      avatar-orb-color-1="#1a1a1a"
+      avatar-orb-color-2="#444444"
+      mic-muting="true"
+      transcript="true"
+    ></elevenlabs-convai>
 
     <button id="logout-btn" class="logout-btn"></button>
   </div>
@@ -77,6 +83,11 @@
         langName:       'italiano',
         tagline:        'essere timidi ha il suo fascino',
         widgetHint:     'TROVA IL WIDGET E CLICCALO',
+        actionText:     'Parla con Shy Order',
+        startCallText:  'Inizia la chiamata',
+        endCallText:    'Termina la chiamata',
+        listeningText:  'In ascolto…',
+        speakingText:   'Sto parlando…',
         googleBtn:      'Continua con Google',
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
@@ -93,6 +104,11 @@
         langName:       'english',
         tagline:        'being shy has its charm',
         widgetHint:     'FIND THE WIDGET AND CLICK IT',
+        actionText:     'Talk to Shy Order',
+        startCallText:  'Start call',
+        endCallText:    'End call',
+        listeningText:  'Listening…',
+        speakingText:   'Speaking…',
         googleBtn:      'Continue with Google',
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
@@ -109,6 +125,11 @@
         langName:       'español',
         tagline:        'ser tímido tiene su encanto',
         widgetHint:     'ENCUENTRA EL WIDGET Y HAZ CLIC',
+        actionText:     'Habla con Shy Order',
+        startCallText:  'Iniciar llamada',
+        endCallText:    'Finalizar llamada',
+        listeningText:  'Escuchando…',
+        speakingText:   'Hablando…',
         googleBtn:      'Continuar con Google',
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
@@ -155,16 +176,22 @@
         b.classList.toggle('active', b.dataset.lang === lang);
       });
 
-      updateWidgetVars();
+      updateWidgetAttrs();
     }
 
-    function updateWidgetVars() {
+    function updateWidgetAttrs() {
       const widget = document.querySelector('elevenlabs-convai');
       if (!widget) return;
+      const t = LANGS[currentLang];
       widget.setAttribute('dynamic-variables', JSON.stringify({
-        user_language:      LANGS[currentLang].langName,
+        user_language:      t.langName,
         call_language_note: 'The actual phone call to the restaurant must always be made in Italian, regardless of the language being used with the user.',
       }));
+      widget.setAttribute('action-text',    t.actionText);
+      widget.setAttribute('start-call-text', t.startCallText);
+      widget.setAttribute('end-call-text',   t.endCallText);
+      widget.setAttribute('listening-text',  t.listeningText);
+      widget.setAttribute('speaking-text',   t.speakingText);
     }
 
     document.querySelectorAll('.lang-btn').forEach(btn => {
