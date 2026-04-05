@@ -182,7 +182,7 @@
 
       document.documentElement.lang = lang;
       document.getElementById('tagline').textContent         = t.tagline;
-      if (displayName) document.getElementById('greeting').textContent = t.greeting(displayName);
+      if (displayName) document.getElementById('greeting').innerHTML = t.greeting(displayName);
       document.getElementById('google-btn-text').textContent = t.googleBtn;
       document.getElementById('payment-title').textContent   = t.paymentTitle;
       document.getElementById('payment-sub').textContent     = t.paymentSub;
@@ -235,7 +235,7 @@
       displayName = name;
       document.getElementById('logo').classList.add('hidden');
       document.getElementById('tagline').classList.add('hidden');
-      document.getElementById('greeting').textContent = LANGS[currentLang].greeting(name);
+      document.getElementById('greeting').innerHTML = LANGS[currentLang].greeting(name);
       document.getElementById('greeting').classList.remove('hidden');
       document.getElementById('dropdown-name').textContent = name;
       document.getElementById('profile-area').classList.remove('hidden');
