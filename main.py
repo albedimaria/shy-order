@@ -9,6 +9,8 @@ from pathlib import Path
 import requests as _requests
 import stripe as _stripe
 import uvicorn
+from twilio.rest import Client as TwilioClient
+from twilio.twiml.voice_response import Connect, VoiceResponse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
@@ -16,7 +18,7 @@ from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from supabase import create_client as _create_supabase_client
@@ -38,6 +40,15 @@ supabase_admin = (
 )
 
 _stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+_twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
+_twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN", "")
+_twilio_phone_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+_twilio_client = (
+    TwilioClient(_twilio_account_sid, _twilio_auth_token)
+    if _twilio_account_sid and _twilio_auth_token
+    else None
+)
 
 _http_bearer = HTTPBearer()
 
@@ -72,6 +83,10 @@ class ScrapeRequest(BaseModel):
 class EndSessionRequest(BaseModel):
     session_id: str
     duration_seconds: int
+
+class TwilioCallRequest(BaseModel):
+    to: str               # E.164 phone number, e.g. "+390612345678"
+    restaurant_name: str
 
 # ---------------------------------------------------------------------------
 # Restaurant DB helpers
@@ -493,6 +508,62 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
 
     return JSONResponse({"amount_charged": amount_cents, "duration_seconds": req.duration_seconds})
+
+# ---------------------------------------------------------------------------
+# Twilio endpoints
+# ---------------------------------------------------------------------------
+
+_RAILWAY_BASE_URL = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order-production.up.railway.app")
+
+
+@app.post("/twilio/call")
+def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse:
+    """Initiate an outbound call from Twilio to the restaurant."""
+    if not _twilio_client:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+    if not _twilio_phone_number:
+        raise HTTPException(status_code=503, detail="TWILIO_PHONE_NUMBER not configured")
+
+    from urllib.parse import quote
+    webhook_url = (
+        f"{_RAILWAY_BASE_URL}/twilio/incoming"
+        f"?restaurant_name={quote(req.restaurant_name)}"
+    )
+
+    try:
+        call = _twilio_client.calls.create(
+            to=req.to,
+            from_=_twilio_phone_number,
+            url=webhook_url,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Twilio error: {e}")
+
+    return JSONResponse({"call_sid": call.sid})
+
+
+@app.post("/twilio/incoming")
+async def twilio_incoming(request: Request) -> Response:
+    """
+    Twilio webhook called when the restaurant picks up.
+    Returns TwiML that streams audio to the ElevenLabs agent via WebSocket.
+    """
+    restaurant_name = request.query_params.get("restaurant_name", "")
+
+    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    stream_url = (
+        f"wss://api.elevenlabs.io/v1/convai/conversation"
+        f"?agent_id={AGENT_ID}"
+        f"&xi-api-key={elevenlabs_api_key}"
+    )
+
+    response = VoiceResponse()
+    connect = Connect()
+    connect.stream(url=stream_url)
+    response.append(connect)
+
+    return Response(content=str(response), media_type="text/xml")
+
 
 # ---------------------------------------------------------------------------
 # Scrape endpoint
