@@ -155,6 +155,10 @@
       },
     };
 
+    // ── Supabase config (public values) ───────────────────────────────────────
+    const SUPABASE_URL      = 'https://jikcpckhthhicmikasfj.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imppa2NwY2todGhoaWNtaWthc2ZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyOTU3NTMsImV4cCI6MjA5MDg3MTc1M30.mm5OSdQjDUqGlgsRYkxzz49lvAWrb1CxSeORbGBUbUc';
+
     // ── State ──────────────────────────────────────────────────────────────────
     let token          = localStorage.getItem('sb_token');
     let stripeObj      = null;
@@ -173,6 +177,53 @@
       const p = parseJwt(t);
       const raw = p?.user_metadata?.full_name || p?.user_metadata?.name || p?.email || '';
       return raw.split(/\s+/)[0];
+    }
+
+    // ── Token storage ─────────────────────────────────────────────────────────
+    function saveTokens(accessToken, refreshToken, expiresIn) {
+      token = accessToken;
+      localStorage.setItem('sb_token', accessToken);
+      if (refreshToken) localStorage.setItem('sb_refresh_token', refreshToken);
+      const exp = Math.floor(Date.now() / 1000) + (expiresIn || 3600);
+      localStorage.setItem('sb_token_exp', String(exp));
+    }
+
+    function clearTokens() {
+      token = null;
+      localStorage.removeItem('sb_token');
+      localStorage.removeItem('sb_refresh_token');
+      localStorage.removeItem('sb_token_exp');
+    }
+
+    async function refreshAccessToken() {
+      const refreshToken = localStorage.getItem('sb_refresh_token');
+      if (!refreshToken) return false;
+      try {
+        const res = await fetch(
+          `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+            body: JSON.stringify({ refresh_token: refreshToken }),
+          }
+        );
+        if (!res.ok) return false;
+        const data = await res.json();
+        saveTokens(data.access_token, data.refresh_token, data.expires_in);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    async function ensureFreshToken() {
+      if (!token) return false;
+      const exp = parseInt(localStorage.getItem('sb_token_exp') || '0', 10);
+      const secondsLeft = exp - Math.floor(Date.now() / 1000);
+      if (exp === 0 || secondsLeft < 3600) {
+        return await refreshAccessToken();
+      }
+      return true;
     }
 
     // ── Language ───────────────────────────────────────────────────────────────
@@ -328,8 +379,7 @@
 
     // ── Logout ─────────────────────────────────────────────────────────────────
     document.getElementById('logout-btn').addEventListener('click', () => {
-      localStorage.removeItem('sb_token');
-      token = null;
+      clearTokens();
       setLoggedOut();
       showScreen('auth');
     });
@@ -339,7 +389,9 @@
       setLanguage(currentLang);
 
       const hash = new URLSearchParams(window.location.hash.slice(1));
-      const hashToken = hash.get('access_token');
+      const hashToken     = hash.get('access_token');
+      const hashRefresh   = hash.get('refresh_token');
+      const hashExpiresIn = parseInt(hash.get('expires_in') || '3600', 10);
 
       if (hashToken) {
         window.history.replaceState({}, '', '/');
@@ -349,8 +401,7 @@
             headers: { 'Authorization': `Bearer ${hashToken}` },
           });
           const d = await res.json();
-          token = hashToken;
-          localStorage.setItem('sb_token', token);
+          saveTokens(hashToken, hashRefresh, hashExpiresIn);
           setLoggedIn(displayNameFromToken(token));
           if (d.has_payment_method) { showScreen('main'); }
           else { await initStripe(); showScreen('payment'); }
@@ -363,9 +414,13 @@
 
       if (!token) { showScreen('auth'); return; }
 
+      // Refresh token if expired or expiring within 1 hour
+      const stillValid = await ensureFreshToken();
+      if (!stillValid) { clearTokens(); showScreen('auth'); return; }
+
       try {
         const res = await api('/payment/status');
-        if (res.status === 401) { localStorage.removeItem('sb_token'); token = null; showScreen('auth'); return; }
+        if (res.status === 401) { clearTokens(); showScreen('auth'); return; }
         const { has_payment_method } = await res.json();
         setLoggedIn(displayNameFromToken(token));
         if (!has_payment_method) { await initStripe(); showScreen('payment'); }
