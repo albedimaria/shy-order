@@ -10,7 +10,7 @@ import requests as _requests
 import stripe as _stripe
 import uvicorn
 from twilio.rest import Client as TwilioClient
-from twilio.twiml.voice_response import Connect, VoiceResponse
+from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
@@ -185,14 +185,12 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
     from urllib.parse import quote
 
     elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    stream_url = (
-        f"wss://api.elevenlabs.io/v1/convai/conversation"
-        f"?agent_id={AGENT_ID}"
-        f"&xi-api-key={elevenlabs_api_key}"
-    )
     twiml = VoiceResponse()
     connect = Connect()
-    connect.stream(url=stream_url)
+    stream = Stream(url="wss://api.elevenlabs.io/v1/convai/conversation")
+    stream.parameter(name="agent_id", value=AGENT_ID)
+    stream.parameter(name="xi-api-key", value=elevenlabs_api_key)
+    connect.append(stream)
     twiml.append(connect)
 
     try:
@@ -626,15 +624,13 @@ async def twilio_incoming(request: Request) -> Response:
     restaurant_name = request.query_params.get("restaurant_name", "")
 
     elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    stream_url = (
-        f"wss://api.elevenlabs.io/v1/convai/conversation"
-        f"?agent_id={AGENT_ID}"
-        f"&xi-api-key={elevenlabs_api_key}"
-    )
 
     response = VoiceResponse()
     connect = Connect()
-    connect.stream(url=stream_url)
+    stream = Stream(url="wss://api.elevenlabs.io/v1/convai/conversation")
+    stream.parameter(name="agent_id", value=AGENT_ID)
+    stream.parameter(name="xi-api-key", value=elevenlabs_api_key)
+    connect.append(stream)
     response.append(connect)
 
     return Response(content=str(response), media_type="text/xml")
