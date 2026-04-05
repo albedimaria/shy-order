@@ -168,12 +168,49 @@ def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
     )
 
 
+def make_restaurant_call_tool(parameters: dict) -> dict:
+    phone_number    = parameters.get("phone_number", "").strip()
+    restaurant_name = parameters.get("restaurant_name", "").strip()
+
+    if not phone_number:
+        return {"success": False, "error": "phone_number is required"}
+    if not _twilio_client:
+        return {"success": False, "error": "Twilio not configured"}
+    if not _twilio_phone_number:
+        return {"success": False, "error": "TWILIO_PHONE_NUMBER not configured"}
+
+    from urllib.parse import quote
+
+    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    stream_url = (
+        f"wss://api.elevenlabs.io/v1/convai/conversation"
+        f"?agent_id={AGENT_ID}"
+        f"&xi-api-key={elevenlabs_api_key}"
+    )
+    twiml = VoiceResponse()
+    connect = Connect()
+    connect.stream(url=stream_url)
+    twiml.append(connect)
+
+    try:
+        call = _twilio_client.calls.create(
+            to=phone_number,
+            from_=_twilio_phone_number,
+            twiml=str(twiml),
+        )
+        return {"success": True, "call_sid": call.sid}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
 TOOL_REGISTRY["save_restaurant_to_local_db"] = save_restaurant_to_local_db_tool
+TOOL_REGISTRY["make_restaurant_call"] = make_restaurant_call_tool
 
 client_tools = ClientTools()
 client_tools.register("lookup_restaurant", lookup_restaurant_tool)
 client_tools.register("save_restaurant_to_local_db", save_restaurant_to_local_db_tool)
+client_tools.register("make_restaurant_call", make_restaurant_call_tool)
 
 # ---------------------------------------------------------------------------
 # Scraping helpers
