@@ -27,6 +27,37 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* ── Language switcher ────────────────────────────────────────────────── */
+
+.lang-switcher {
+  position: fixed;
+  top: 1rem;
+  right: 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.lang-btn {
+  background: none;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.2rem;
+  transition: color 0.15s;
+}
+
+.lang-btn:hover { color: #888; }
+.lang-btn.active { color: #f0f0f0; }
+
+.lang-sep {
+  color: #2e2e2e;
+  font-size: 0.75rem;
+}
+
 /* ── Screens ──────────────────────────────────────────────────────────── */
 
 .screen { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 0.8rem; }

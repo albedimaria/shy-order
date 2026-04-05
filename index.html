@@ -10,8 +10,17 @@
 </head>
 <body>
 
+  <!-- ── Language switcher ─────────────────────────────────────── -->
+  <div class="lang-switcher">
+    <button class="lang-btn" data-lang="it">IT</button>
+    <span class="lang-sep">·</span>
+    <button class="lang-btn" data-lang="en">EN</button>
+    <span class="lang-sep">·</span>
+    <button class="lang-btn" data-lang="es">ES</button>
+  </div>
+
   <div class="logo">Shy Order</div>
-  <div class="tagline">essere timidi ha il suo fascino</div>
+  <div id="tagline" class="tagline"></div>
 
   <!-- ── Auth screen ─────────────────────────────────────────── -->
   <div id="screen-auth" class="screen hidden">
@@ -22,17 +31,17 @@
         <path d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332Z" fill="#FBBC05"/>
         <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.961L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58Z" fill="#EA4335"/>
       </svg>
-      Continua con Google
+      <span id="google-btn-text"></span>
     </a>
     <p id="auth-error" class="form-error"></p>
   </div>
 
   <!-- ── Payment setup screen ───────────────────────────────── -->
   <div id="screen-payment" class="screen hidden">
-    <p class="section-title">Aggiungi una carta</p>
-    <p class="section-sub">Ti verrà addebitato €0,15/min + €0,20 a conversazione.</p>
+    <p id="payment-title" class="section-title"></p>
+    <p id="payment-sub" class="section-sub"></p>
     <div id="card-element" class="card-element"></div>
-    <button id="save-card-btn" class="primary-btn">Salva carta</button>
+    <button id="save-card-btn" class="primary-btn"></button>
     <p id="payment-error" class="form-error"></p>
   </div>
 
@@ -44,32 +53,119 @@
           type="url"
           id="restaurant-url"
           class="scrape-input"
-          placeholder="link ristorante (opzionale ma consigliato)"
         />
-        <button id="scrape-btn" class="scrape-btn">Cerca</button>
+        <button id="scrape-btn" class="scrape-btn"></button>
       </div>
       <div id="scrape-result" class="scrape-result"></div>
     </div>
 
     <p class="arrow-annotation">FIND THE WIDGET AND CLICK IT</p>
 
-    <p id="no-data-hint" class="no-data-hint">💡 Suggerimento: prima di iniziare, tieni a portata di mano il numero di telefono e l'indirizzo del ristorante.</p>
+    <p id="no-data-hint" class="no-data-hint"></p>
 
     <elevenlabs-convai agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"></elevenlabs-convai>
 
-    <button id="logout-btn" class="logout-btn">Esci</button>
+    <button id="logout-btn" class="logout-btn"></button>
   </div>
 
-  <div class="disclaimer">
-    prenota un tavolo o ordina cibo senza chiamare davvero
-  </div>
+  <div id="disclaimer" class="disclaimer"></div>
 
   <script type="module">
+    // ── Translations ───────────────────────────────────────────────────────────
+    const LANGS = {
+      it: {
+        langName:       'italiano',
+        tagline:        'essere timidi ha il suo fascino',
+        googleBtn:      'Continua con Google',
+        paymentTitle:   'Aggiungi una carta',
+        paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
+        saveCard:       'Salva carta',
+        scrapeInput:    'link ristorante (opzionale ma consigliato)',
+        scrapeBtn:      'Cerca',
+        noDataHint:     '💡 Suggerimento: prima di iniziare, tieni a portata di mano il numero di telefono e l\'indirizzo del ristorante.',
+        logout:         'Esci',
+        disclaimer:     'prenota un tavolo o ordina cibo senza chiamare davvero',
+        authError:      'Errore durante il login con Google.',
+        scrapeFail:     'Nessun dato trovato.',
+      },
+      en: {
+        langName:       'english',
+        tagline:        'being shy has its charm',
+        googleBtn:      'Continue with Google',
+        paymentTitle:   'Add a card',
+        paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
+        saveCard:       'Save card',
+        scrapeInput:    'restaurant link (optional but recommended)',
+        scrapeBtn:      'Search',
+        noDataHint:     '💡 Tip: before starting, have the restaurant\'s phone number and address handy.',
+        logout:         'Logout',
+        disclaimer:     'book a table or order food without actually calling',
+        authError:      'Error during Google login.',
+        scrapeFail:     'No data found.',
+      },
+      es: {
+        langName:       'español',
+        tagline:        'ser tímido tiene su encanto',
+        googleBtn:      'Continuar con Google',
+        paymentTitle:   'Añade una tarjeta',
+        paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
+        saveCard:       'Guardar tarjeta',
+        scrapeInput:    'enlace del restaurante (opcional pero recomendado)',
+        scrapeBtn:      'Buscar',
+        noDataHint:     '💡 Sugerencia: antes de empezar, ten a mano el número de teléfono y la dirección del restaurante.',
+        logout:         'Salir',
+        disclaimer:     'reserva una mesa o pide comida sin llamar de verdad',
+        authError:      'Error durante el inicio de sesión con Google.',
+        scrapeFail:     'No se encontraron datos.',
+      },
+    };
+
     // ── State ──────────────────────────────────────────────────────────────────
     let token          = localStorage.getItem('sb_token');
     let stripeObj      = null;
     let cardElement    = null;
     let restaurantData = {};
+    let currentLang    = localStorage.getItem('lang') || 'it';
+
+    // ── Language ───────────────────────────────────────────────────────────────
+    function setLanguage(lang) {
+      currentLang = lang;
+      localStorage.setItem('lang', lang);
+      const t = LANGS[lang];
+
+      document.documentElement.lang = lang;
+      document.getElementById('tagline').textContent          = t.tagline;
+      document.getElementById('google-btn-text').textContent  = t.googleBtn;
+      document.getElementById('payment-title').textContent    = t.paymentTitle;
+      document.getElementById('payment-sub').textContent      = t.paymentSub;
+      document.getElementById('save-card-btn').textContent    = t.saveCard;
+      document.getElementById('restaurant-url').placeholder   = t.scrapeInput;
+      document.getElementById('no-data-hint').textContent     = t.noDataHint;
+      document.getElementById('logout-btn').textContent       = t.logout;
+      document.getElementById('disclaimer').textContent       = t.disclaimer;
+
+      const scrapeBtn = document.getElementById('scrape-btn');
+      if (!scrapeBtn.disabled) scrapeBtn.textContent = t.scrapeBtn;
+
+      document.querySelectorAll('.lang-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.lang === lang);
+      });
+
+      updateWidgetVars();
+    }
+
+    function updateWidgetVars() {
+      const widget = document.querySelector('elevenlabs-convai');
+      if (!widget) return;
+      widget.setAttribute('dynamic-variables', JSON.stringify({
+        user_language:      LANGS[currentLang].langName,
+        call_language_note: 'The actual phone call to the restaurant must always be made in Italian, regardless of the language being used with the user.',
+      }));
+    }
+
+    document.querySelectorAll('.lang-btn').forEach(btn => {
+      btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+    });
 
     // ── Screens ────────────────────────────────────────────────────────────────
     function showScreen(name) {
@@ -85,9 +181,6 @@
       if (token) headers['Authorization'] = `Bearer ${token}`;
       return fetch(BASE + path, { ...opts, headers });
     }
-
-    // ── Auth ───────────────────────────────────────────────────────────────────
-    // (solo Google OAuth — nessun form email/password)
 
     // ── Stripe / payment setup ─────────────────────────────────────────────────
     async function initStripe() {
@@ -142,7 +235,7 @@
         if (!res.ok) throw new Error(await res.text());
         restaurantData = await res.json();
         const parts = [restaurantData.name, restaurantData.phone_number, restaurantData.address, restaurantData.hours].filter(Boolean);
-        result.textContent = parts.length ? parts.join(' · ') : 'Nessun dato trovato.';
+        result.textContent = parts.length ? parts.join(' · ') : LANGS[currentLang].scrapeFail;
         result.classList.add(parts.length ? 'found' : 'empty');
         document.getElementById('no-data-hint').hidden = parts.length > 0;
       } catch (err) {
@@ -150,7 +243,7 @@
         result.classList.add('error');
       } finally {
         btn.disabled = false;
-        btn.textContent = 'Cerca';
+        btn.textContent = LANGS[currentLang].scrapeBtn;
       }
     });
 
@@ -163,6 +256,8 @@
 
     // ── Init ───────────────────────────────────────────────────────────────────
     async function init() {
+      setLanguage(currentLang);
+
       // Handle redirect back from Supabase OAuth — token arrives as a hash fragment
       const hash = new URLSearchParams(window.location.hash.slice(1));
       const hashToken = hash.get('access_token');
@@ -180,7 +275,7 @@
           if (d.has_payment_method) { showScreen('main'); }
           else { await initStripe(); showScreen('payment'); }
         } catch (_) {
-          document.getElementById('auth-error').textContent = 'Errore durante il login con Google.';
+          document.getElementById('auth-error').textContent = LANGS[currentLang].authError;
           showScreen('auth');
         }
         return;
