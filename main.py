@@ -4,6 +4,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import requests as _requests
@@ -198,10 +199,25 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
             to=phone_number,
             from_=_twilio_phone_number,
             twiml=str(twiml),
+            status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
+            status_callback_method="POST",
         )
-        return {"success": True, "call_sid": call.sid}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+    call_sid = call.sid
+    _call_statuses[call_sid] = call.status
+
+    # Poll until terminal status or 60s timeout
+    terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        time.sleep(3)
+        status = _call_statuses.get(call_sid, "")
+        if status in terminal:
+            return {"success": True, "call_sid": call_sid, "status": status}
+
+    return {"success": True, "call_sid": call_sid, "status": _call_statuses.get(call_sid, "timeout")}
 
 
 def check_call_status_tool(parameters: dict) -> dict:
