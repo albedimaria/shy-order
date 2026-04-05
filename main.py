@@ -50,6 +50,9 @@ _twilio_client = (
     else None
 )
 
+# In-memory call status store: {call_sid: status_string}
+_call_statuses: dict[str, str] = {}
+
 _http_bearer = HTTPBearer()
 
 # ---------------------------------------------------------------------------
@@ -203,14 +206,26 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def check_call_status_tool(parameters: dict) -> dict:
+    call_sid = parameters.get("call_sid", "").strip()
+    if not call_sid:
+        return {"success": False, "error": "call_sid is required"}
+    status = _call_statuses.get(call_sid)
+    if status is None:
+        return {"success": False, "error": "call_sid not found"}
+    return {"success": True, "call_sid": call_sid, "status": status}
+
+
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
 TOOL_REGISTRY["save_restaurant_to_local_db"] = save_restaurant_to_local_db_tool
 TOOL_REGISTRY["make_restaurant_call"] = make_restaurant_call_tool
+TOOL_REGISTRY["check_call_status"] = check_call_status_tool
 
 client_tools = ClientTools()
 client_tools.register("lookup_restaurant", lookup_restaurant_tool)
 client_tools.register("save_restaurant_to_local_db", save_restaurant_to_local_db_tool)
 client_tools.register("make_restaurant_call", make_restaurant_call_tool)
+client_tools.register("check_call_status", check_call_status_tool)
 
 # ---------------------------------------------------------------------------
 # Scraping helpers
@@ -572,11 +587,34 @@ def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse
             to=req.to,
             from_=_twilio_phone_number,
             url=webhook_url,
+            status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
+            status_callback_method="POST",
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Twilio error: {e}")
 
+    _call_statuses[call.sid] = call.status
     return JSONResponse({"call_sid": call.sid})
+
+
+@app.post("/twilio/status")
+async def twilio_status(request: Request) -> Response:
+    """Twilio status callback — records call status changes in memory."""
+    form = await request.form()
+    call_sid    = form.get("CallSid", "")
+    call_status = form.get("CallStatus", "")
+    if call_sid:
+        _call_statuses[call_sid] = call_status
+    return Response(status_code=200)
+
+
+@app.get("/twilio/call-status/{call_sid}")
+def twilio_call_status(call_sid: str) -> JSONResponse:
+    """Polling endpoint — returns the latest known status for a call."""
+    status = _call_statuses.get(call_sid)
+    if status is None:
+        raise HTTPException(status_code=404, detail="call_sid not found")
+    return JSONResponse({"call_sid": call_sid, "status": status})
 
 
 @app.post("/twilio/incoming")
