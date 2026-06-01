@@ -1,15 +1,17 @@
 import argparse
-import json
+import hmac
 import math
 import os
 import re
 import sys
 import time
-from pathlib import Path
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests as _requests
 import stripe as _stripe
 import uvicorn
+from twilio.request_validator import RequestValidator as TwilioRequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 from bs4 import BeautifulSoup
@@ -19,7 +21,7 @@ from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from supabase import create_client as _create_supabase_client
@@ -27,6 +29,8 @@ from supabase import create_client as _create_supabase_client
 load_dotenv()
 
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
+
+_E164_RE = re.compile(r"^\+\d{7,15}$")
 
 # ---------------------------------------------------------------------------
 # External clients
@@ -51,8 +55,12 @@ _twilio_client = (
     else None
 )
 
-# In-memory call status store: {call_sid: status_string}
-_call_statuses: dict[str, str] = {}
+_RAILWAY_BASE_URL    = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
+_FRONTEND_URL        = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
+_TOOLS_WEBHOOK_SECRET = os.getenv("TOOLS_WEBHOOK_SECRET", "")
+
+# In-memory fallback for call statuses (single-worker only; Supabase is preferred)
+_call_statuses_mem: dict[str, str] = {}
 
 _http_bearer = HTTPBearer()
 
@@ -86,90 +94,127 @@ class ScrapeRequest(BaseModel):
 
 class EndSessionRequest(BaseModel):
     session_id: str
-    duration_seconds: int
 
 class TwilioCallRequest(BaseModel):
-    to: str               # E.164 phone number, e.g. "+390612345678"
+    to: str
     restaurant_name: str
 
 # ---------------------------------------------------------------------------
-# Restaurant DB helpers
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _is_e164(phone: str) -> bool:
+    return bool(_E164_RE.match(phone))
+
+
+def _validate_twilio_sig(request: Request, params: dict) -> None:
+    """Reject requests not signed by Twilio. No-op if auth token not configured."""
+    if not _twilio_auth_token:
+        return
+    path = request.url.path
+    query = str(request.url.query)
+    url = f"{_RAILWAY_BASE_URL}{path}"
+    if query:
+        url += f"?{query}"
+    validator = TwilioRequestValidator(_twilio_auth_token)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not validator.validate(url, params, signature):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+
+def _check_tools_auth(request: Request) -> None:
+    """Validate shared secret on ElevenLabs tool webhook calls."""
+    if not _TOOLS_WEBHOOK_SECRET:
+        return
+    provided = request.headers.get("x-tools-secret", "")
+    if not hmac.compare_digest(provided, _TOOLS_WEBHOOK_SECRET):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# ---------------------------------------------------------------------------
+# Call status store — Supabase-backed, in-memory fallback for local dev
+# ---------------------------------------------------------------------------
+
+def _get_call_status(call_sid: str) -> str | None:
+    if supabase_admin:
+        try:
+            result = supabase_admin.table("call_statuses").select("status").eq("call_sid", call_sid).execute()
+            if result.data:
+                return result.data[0]["status"]
+            return None
+        except Exception:
+            pass
+    return _call_statuses_mem.get(call_sid)
+
+
+def _set_call_status(call_sid: str, status: str) -> None:
+    if supabase_admin:
+        try:
+            supabase_admin.table("call_statuses").upsert({
+                "call_sid": call_sid,
+                "status": status,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            return
+        except Exception:
+            pass
+    _call_statuses_mem[call_sid] = status
+
+# ---------------------------------------------------------------------------
+# Restaurant DB helpers — Supabase-backed (replaces restaurants.json)
 # ---------------------------------------------------------------------------
 
 TOOL_REGISTRY: dict[str, callable] = {}
 
 
-def get_or_create_restaurant(
-    name: str,
-    phone_number: str,
-    address: str,
-    db_path: str | os.PathLike[str] = "restaurants.json",
-) -> dict:
-    db_file = Path(db_path)
-    if db_file.exists():
-        try:
-            with db_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            data = []
-    else:
-        data = []
-    if not isinstance(data, list):
-        data = []
-
-    name_lower = name.strip().lower()
-    for restaurant in data:
-        if isinstance(restaurant, dict) and restaurant.get("name", "").strip().lower() == name_lower:
-            return restaurant
-
-    new_restaurant = {
-        "name": name.strip(),
-        "phone_number": phone_number.strip(),
-        "address": address.strip(),
-    }
-    data.append(new_restaurant)
+def get_or_create_restaurant(name: str, phone_number: str, address: str) -> dict:
+    if not supabase_admin:
+        raise RuntimeError("Supabase not configured")
+    name = name.strip()
     try:
-        with db_file.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except OSError as e:
-        print(f"Error writing to restaurant database file: {e}", file=sys.stderr)
-        sys.exit(1)
-    return new_restaurant
-
+        result = supabase_admin.table("restaurants").select("*").ilike("name", name).execute()
+        if result.data:
+            return result.data[0]
+        result = supabase_admin.table("restaurants").insert({
+            "name": name,
+            "phone_number": phone_number.strip(),
+            "address": address.strip(),
+        }).execute()
+        return result.data[0]
+    except Exception as e:
+        raise RuntimeError(f"Restaurant DB error: {e}") from e
 
 # ---------------------------------------------------------------------------
 # Tool functions
 # ---------------------------------------------------------------------------
 
 def lookup_restaurant_tool(parameters: dict) -> dict:
-    name_query = parameters.get("name", "").strip().lower()
-    db_file = Path("restaurants.json")
-    if not db_file.exists():
+    name_query = parameters.get("name", "").strip()
+    if not supabase_admin or not name_query:
         return {"found": False}
     try:
-        with db_file.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"found": False}
-    if not isinstance(data, list):
-        return {"found": False}
-    for restaurant in data:
-        if isinstance(restaurant, dict) and restaurant.get("name", "").strip().lower() == name_query:
+        result = supabase_admin.table("restaurants").select("*").ilike("name", name_query).execute()
+        if result.data:
+            r = result.data[0]
             return {
                 "found": True,
-                "name": restaurant["name"],
-                "phone_number": restaurant["phone_number"],
-                "address": restaurant["address"],
+                "name": r["name"],
+                "phone_number": r["phone_number"],
+                "address": r.get("address", ""),
             }
+    except Exception:
+        pass
     return {"found": False}
 
 
 def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
-    return get_or_create_restaurant(
-        name=parameters.get("name", ""),
-        phone_number=parameters.get("phone_number", ""),
-        address=parameters.get("address", ""),
-    )
+    try:
+        return get_or_create_restaurant(
+            name=parameters.get("name", ""),
+            phone_number=parameters.get("phone_number", ""),
+            address=parameters.get("address", ""),
+        )
+    except RuntimeError as e:
+        return {"error": str(e)}
 
 
 def make_restaurant_call_tool(parameters: dict) -> dict:
@@ -178,27 +223,20 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
 
     if not phone_number:
         return {"success": False, "error": "phone_number is required"}
+    if not _is_e164(phone_number):
+        return {"success": False, "error": "phone_number must be E.164 format (e.g. +390612345678)"}
     if not _twilio_client:
         return {"success": False, "error": "Twilio not configured"}
     if not _twilio_phone_number:
         return {"success": False, "error": "TWILIO_PHONE_NUMBER not configured"}
 
-    from urllib.parse import quote
-
-    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    twiml = VoiceResponse()
-    connect = Connect()
-    stream = Stream(url="wss://api.elevenlabs.io/v1/convai/conversation")
-    stream.parameter(name="agent_id", value=AGENT_ID)
-    stream.parameter(name="xi-api-key", value=elevenlabs_api_key)
-    connect.append(stream)
-    twiml.append(connect)
+    webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
 
     try:
         call = _twilio_client.calls.create(
             to=phone_number,
             from_=_twilio_phone_number,
-            twiml=str(twiml),
+            url=webhook_url,
             status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
             status_callback_method="POST",
         )
@@ -206,25 +244,24 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         return {"success": False, "error": str(e)}
 
     call_sid = call.sid
-    _call_statuses[call_sid] = call.status
+    _set_call_status(call_sid, call.status)
 
-    # Poll until terminal status or 60s timeout
     terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
     deadline = time.time() + 60
     while time.time() < deadline:
         time.sleep(3)
-        status = _call_statuses.get(call_sid, "")
+        status = _get_call_status(call_sid) or ""
         if status in terminal:
             return {"success": True, "call_sid": call_sid, "status": status}
 
-    return {"success": True, "call_sid": call_sid, "status": _call_statuses.get(call_sid, "timeout")}
+    return {"success": True, "call_sid": call_sid, "status": _get_call_status(call_sid) or "timeout"}
 
 
 def check_call_status_tool(parameters: dict) -> dict:
     call_sid = parameters.get("call_sid", "").strip()
     if not call_sid:
         return {"success": False, "error": "call_sid is required"}
-    status = _call_statuses.get(call_sid)
+    status = _get_call_status(call_sid)
     if status is None:
         return {"success": False, "error": "call_sid not found"}
     return {"success": True, "call_sid": call_sid, "status": status}
@@ -303,9 +340,16 @@ def _scrape_hours(soup: BeautifulSoup) -> str | None:
 
 app = FastAPI()
 
+_allowed_origins = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        f"{_FRONTEND_URL},{_RAILWAY_BASE_URL}",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -348,21 +392,30 @@ def auth_register(req: RegisterRequest) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Create Stripe customer
     try:
         customer = _stripe.Customer.create(email=req.email)
         stripe_customer_id = customer.id
     except Exception as e:
+        try:
+            supabase_admin.auth.admin.delete_user(str(user.id))
+        except Exception:
+            pass
         raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
 
-    # Save to public.users
-    supabase_admin.table("users").insert({
-        "id": str(user.id),
-        "email": req.email,
-        "stripe_customer_id": stripe_customer_id,
-    }).execute()
+    try:
+        supabase_admin.table("users").insert({
+            "id": str(user.id),
+            "email": req.email,
+            "stripe_customer_id": stripe_customer_id,
+        }).execute()
+    except Exception as e:
+        try:
+            supabase_admin.auth.admin.delete_user(str(user.id))
+            _stripe.Customer.delete(stripe_customer_id)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Could not save user: {e}")
 
-    # Sign in to get access token
     try:
         sign_in = supabase_admin.auth.sign_in_with_password({"email": req.email, "password": req.password})
     except Exception as e:
@@ -385,7 +438,6 @@ def auth_login(req: LoginRequest) -> JSONResponse:
         raise HTTPException(status_code=401, detail=str(e))
 
     user = resp.user
-    # Check payment method
     has_payment_method = False
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
@@ -410,26 +462,22 @@ def auth_login(req: LoginRequest) -> JSONResponse:
 def auth_google(request: Request) -> RedirectResponse:
     if not supabase_admin:
         raise HTTPException(status_code=503, detail="Supabase not configured")
-    # Supabase sends the token as a hash fragment directly to the frontend
     oauth_url = (
         f"{_supabase_url}/auth/v1/authorize"
         f"?provider=google"
-        f"&redirect_to=https://shy-order.vercel.app"
+        f"&redirect_to={_FRONTEND_URL}"
     )
     return RedirectResponse(url=oauth_url)
 
 
-
 @app.post("/auth/google-complete")
 def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
-    """Ensure a Stripe customer exists for this OAuth user, return payment status."""
     try:
         existing = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     if not existing.data:
-        # First login — create Stripe customer and insert user record
         try:
             customer = _stripe.Customer.create(email=user.email)
         except Exception as e:
@@ -441,14 +489,12 @@ def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
         }).execute()
         return JSONResponse({"has_payment_method": False})
 
-    # Returning user — check for saved card
     stripe_customer_id = existing.data[0].get("stripe_customer_id")
     try:
         pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
         return JSONResponse({"has_payment_method": len(pms.data) > 0})
     except Exception:
         return JSONResponse({"has_payment_method": False})
-
 
 # ---------------------------------------------------------------------------
 # Payment endpoints
@@ -491,7 +537,6 @@ def payment_setup(user=Depends(_get_user)) -> JSONResponse:
 
 @app.post("/session/start")
 def session_start(user=Depends(_get_user)) -> JSONResponse:
-    # Verify payment method exists
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
         stripe_customer_id = record.data.get("stripe_customer_id")
@@ -503,14 +548,12 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # Create session record
     try:
         session_resp = supabase_admin.table("sessions").insert({"user_id": str(user.id)}).execute()
         session_id = session_resp.data[0]["id"]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not create session: {e}")
 
-    # Get ElevenLabs signed URL
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
@@ -532,9 +575,24 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
 
 @app.post("/session/end")
 def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse:
-    # Cost: €0.10/min ElevenLabs + €0.05/min Twilio + €0.20 flat fee
-    minutes = math.ceil(req.duration_seconds / 60)
-    amount_cents = minutes * 15 + 20  # 15 cents/min + 20 cents flat
+    # Compute duration from server-side started_at to prevent client manipulation
+    try:
+        session_rec = (
+            supabase_admin.table("sessions")
+            .select("started_at")
+            .eq("id", req.session_id)
+            .eq("user_id", str(user.id))
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    started_at = datetime.fromisoformat(session_rec.data["started_at"].replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    duration_seconds = max(1, int((now - started_at).total_seconds()))
+    minutes = math.ceil(duration_seconds / 60)
+    amount_cents = minutes * 15 + 20
 
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
@@ -548,7 +606,6 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # Charge
     try:
         payment_intent = _stripe.PaymentIntent.create(
             amount=amount_cents,
@@ -564,37 +621,29 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # Update session record
-    from datetime import datetime, timezone
     supabase_admin.table("sessions").update({
-        "ended_at": datetime.now(timezone.utc).isoformat(),
-        "duration_seconds": req.duration_seconds,
+        "ended_at": now.isoformat(),
+        "duration_seconds": duration_seconds,
         "amount_charged": amount_cents,
         "stripe_payment_intent_id": pi_id,
     }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
 
-    return JSONResponse({"amount_charged": amount_cents, "duration_seconds": req.duration_seconds})
+    return JSONResponse({"amount_charged": amount_cents, "duration_seconds": duration_seconds})
 
 # ---------------------------------------------------------------------------
 # Twilio endpoints
 # ---------------------------------------------------------------------------
 
-_RAILWAY_BASE_URL = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order-production.up.railway.app")
-
-
 @app.post("/twilio/call")
 def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse:
-    """Initiate an outbound call from Twilio to the restaurant."""
     if not _twilio_client:
         raise HTTPException(status_code=503, detail="Twilio not configured")
     if not _twilio_phone_number:
         raise HTTPException(status_code=503, detail="TWILIO_PHONE_NUMBER not configured")
+    if not _is_e164(req.to):
+        raise HTTPException(status_code=422, detail="'to' must be E.164 format (e.g. +390612345678)")
 
-    from urllib.parse import quote
-    webhook_url = (
-        f"{_RAILWAY_BASE_URL}/twilio/incoming"
-        f"?restaurant_name={quote(req.restaurant_name)}"
-    )
+    webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
 
     try:
         call = _twilio_client.calls.create(
@@ -607,25 +656,24 @@ def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Twilio error: {e}")
 
-    _call_statuses[call.sid] = call.status
+    _set_call_status(call.sid, call.status)
     return JSONResponse({"call_sid": call.sid})
 
 
 @app.post("/twilio/status")
 async def twilio_status(request: Request) -> Response:
-    """Twilio status callback — records call status changes in memory."""
     form = await request.form()
+    _validate_twilio_sig(request, dict(form))
     call_sid    = form.get("CallSid", "")
     call_status = form.get("CallStatus", "")
     if call_sid:
-        _call_statuses[call_sid] = call_status
+        _set_call_status(call_sid, call_status)
     return Response(status_code=200)
 
 
 @app.get("/twilio/call-status/{call_sid}")
-def twilio_call_status(call_sid: str) -> JSONResponse:
-    """Polling endpoint — returns the latest known status for a call."""
-    status = _call_statuses.get(call_sid)
+def twilio_call_status(call_sid: str, user=Depends(_get_user)) -> JSONResponse:
+    status = _get_call_status(call_sid)
     if status is None:
         raise HTTPException(status_code=404, detail="call_sid not found")
     return JSONResponse({"call_sid": call_sid, "status": status})
@@ -633,31 +681,48 @@ def twilio_call_status(call_sid: str) -> JSONResponse:
 
 @app.post("/twilio/incoming")
 async def twilio_incoming(request: Request) -> Response:
-    """
-    Twilio webhook called when the restaurant picks up.
-    Returns TwiML that streams audio to the ElevenLabs agent via WebSocket.
-    """
+    form = await request.form()
+    _validate_twilio_sig(request, dict(form))
+
     restaurant_name = request.query_params.get("restaurant_name", "")
 
-    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    # Fetch a short-lived signed token to avoid exposing the API key in TwiML
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    ws_url = None
+    try:
+        resp = _requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/token",
+            params={"agent_id": AGENT_ID},
+            headers={"xi-api-key": api_key},
+            timeout=5,
+        )
+        if resp.ok:
+            token = resp.json().get("token")
+            if token:
+                ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
+    except Exception:
+        pass
+
+    if not ws_url:
+        error_twiml = VoiceResponse()
+        error_twiml.say("Si è verificato un errore tecnico. Riprova più tardi.", language="it-IT")
+        error_twiml.hangup()
+        return Response(content=str(error_twiml), media_type="text/xml")
 
     response = VoiceResponse()
     connect = Connect()
-    stream = Stream(url="wss://api.elevenlabs.io/v1/convai/conversation")
-    stream.parameter(name="agent_id", value=AGENT_ID)
-    stream.parameter(name="xi-api-key", value=elevenlabs_api_key)
+    stream = Stream(url=ws_url)
     connect.append(stream)
     response.append(connect)
 
     return Response(content=str(response), media_type="text/xml")
-
 
 # ---------------------------------------------------------------------------
 # Scrape endpoint
 # ---------------------------------------------------------------------------
 
 @app.post("/scrape")
-def scrape(req: ScrapeRequest) -> JSONResponse:
+def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
     try:
         resp = _requests.get(
             req.url,
@@ -688,8 +753,9 @@ def _run_tool(tool_name: str, parameters: dict) -> JSONResponse:
 
 
 @app.post("/tools")
-async def tools_webhook(payload: dict) -> JSONResponse:
-    tool_name = payload.get("tool_name")
+def tools_webhook(request: Request, payload: dict) -> JSONResponse:
+    _check_tools_auth(request)
+    tool_name  = payload.get("tool_name")
     parameters = payload.get("parameters", {})
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
@@ -697,8 +763,9 @@ async def tools_webhook(payload: dict) -> JSONResponse:
 
 
 @app.post("/tools/{tool_name}")
-async def tools_by_path(tool_name: str, payload: dict = {}) -> JSONResponse:
-    parameters = payload.get("parameters", payload)
+def tools_by_path(tool_name: str, request: Request, payload: dict | None = None) -> JSONResponse:
+    _check_tools_auth(request)
+    parameters = (payload or {}).get("parameters", payload or {})
     return _run_tool(tool_name, parameters)
 
 # ---------------------------------------------------------------------------
