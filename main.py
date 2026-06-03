@@ -55,9 +55,12 @@ _twilio_client = (
     else None
 )
 
-_RAILWAY_BASE_URL    = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
-_FRONTEND_URL        = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
+_RAILWAY_BASE_URL     = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
+_FRONTEND_URL         = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
 _TOOLS_WEBHOOK_SECRET = os.getenv("TOOLS_WEBHOOK_SECRET", "")
+# Override all outbound calls to a fixed number (e.g. for Twilio trial testing).
+# Set to "" or unset in production to call the real restaurant number.
+_TWILIO_OVERRIDE_TO   = os.getenv("TWILIO_OVERRIDE_TO", "")
 
 # In-memory fallback for call statuses (single-worker only; Supabase is preferred)
 _call_statuses_mem: dict[str, str] = {}
@@ -236,11 +239,14 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
     if not _twilio_phone_number:
         return {"success": False, "error": "TWILIO_PHONE_NUMBER not configured"}
 
+    # Trial mode: redirect all outbound calls to a fixed test number
+    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
+
     webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
 
     try:
         call = _twilio_client.calls.create(
-            to=phone_number,
+            to=dial_to,
             from_=_twilio_phone_number,
             url=webhook_url,
             status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
@@ -679,10 +685,11 @@ def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse
         raise HTTPException(status_code=422, detail="'to' must be E.164 format (e.g. +390612345678)")
 
     webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
+    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else req.to
 
     try:
         call = _twilio_client.calls.create(
-            to=req.to,
+            to=dial_to,
             from_=_twilio_phone_number,
             url=webhook_url,
             status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
