@@ -95,6 +95,10 @@ class ScrapeRequest(BaseModel):
 class EndSessionRequest(BaseModel):
     session_id: str
 
+class SessionLinkRequest(BaseModel):
+    session_id: str
+    conversation_id: str
+
 class TwilioCallRequest(BaseModel):
     to: str
     restaurant_name: str
@@ -218,6 +222,8 @@ def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
 
 
 def make_restaurant_call_tool(parameters: dict) -> dict:
+    # __conversation_id__ is injected by the /tools webhook handler
+    conversation_id = parameters.pop("__conversation_id__", "")
     phone_number    = parameters.get("phone_number", "").strip()
     restaurant_name = parameters.get("restaurant_name", "").strip()
 
@@ -245,6 +251,23 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
 
     call_sid = call.sid
     _set_call_status(call_sid, call.status)
+
+    # Track restaurant analytics
+    if supabase_admin and restaurant_name:
+        try:
+            supabase_admin.rpc(
+                "increment_restaurant_call_count", {"p_name": restaurant_name}
+            ).execute()
+        except Exception:
+            pass
+        # Link restaurant to the current session (if conversation_id was supplied)
+        if conversation_id:
+            try:
+                supabase_admin.table("sessions").update(
+                    {"restaurant_name": restaurant_name}
+                ).eq("elevenlabs_conversation_id", conversation_id).execute()
+            except Exception:
+                pass
 
     terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
     deadline = time.time() + 60
@@ -630,6 +653,18 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
 
     return JSONResponse({"amount_charged": amount_cents, "duration_seconds": duration_seconds})
 
+
+@app.post("/session/link")
+def session_link(req: SessionLinkRequest, user=Depends(_get_user)) -> JSONResponse:
+    """Link an ElevenLabs conversation_id to a session so restaurant analytics can be tracked."""
+    try:
+        supabase_admin.table("sessions").update(
+            {"elevenlabs_conversation_id": req.conversation_id}
+        ).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return JSONResponse({"ok": True})
+
 # ---------------------------------------------------------------------------
 # Twilio endpoints
 # ---------------------------------------------------------------------------
@@ -756,9 +791,11 @@ def _run_tool(tool_name: str, parameters: dict) -> JSONResponse:
 def tools_webhook(request: Request, payload: dict) -> JSONResponse:
     _check_tools_auth(request)
     tool_name  = payload.get("tool_name")
-    parameters = payload.get("parameters", {})
+    parameters = dict(payload.get("parameters", {}))
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
+    # Inject ElevenLabs conversation_id so tools can link analytics back to the session
+    parameters["__conversation_id__"] = payload.get("conversation_id", "")
     return _run_tool(tool_name, parameters)
 
 
