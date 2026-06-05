@@ -1,9 +1,14 @@
-python-dotenv
-requests
+# Upper bounds only: cap the major version so a future redeploy can't silently
+# pull a breaking release (e.g. supabase 3.x, stripe 13, twilio 10). No lower
+# bounds — the resolver keeps whatever is already installed under each cap, so
+# this never forces an upgrade or downgrade. elevenlabs is left unpinned because
+# its SDK iterates too fast to cap safely without the deployed version on hand.
+python-dotenv<2
+requests<3
 elevenlabs
-fastapi
-uvicorn[standard]
-beautifulsoup4
-supabase
-stripe
-twilio
+fastapi<1
+uvicorn[standard]<1
+beautifulsoup4<5
+supabase<3
+stripe<13
+twilio<10

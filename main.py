@@ -1,12 +1,14 @@
 import argparse
 import hmac
+import ipaddress
 import math
 import os
 import re
+import socket
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import requests as _requests
 import stripe as _stripe
@@ -38,9 +40,22 @@ _E164_RE = re.compile(r"^\+\d{7,15}$")
 
 _supabase_url = os.getenv("SUPABASE_URL", "")
 _supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+_supabase_anon_key = os.getenv("SUPABASE_ANON_KEY", "")
+# Service-role client: bypasses RLS, used for all DB/admin operations.
+# NEVER call sign_in_with_password on this client — a SIGNED_IN event would
+# downgrade its PostgREST Authorization header from service_role to the user's
+# JWT (and that mutation is shared across all concurrent requests), silently
+# breaking RLS-protected inserts. User sign-in goes through supabase_auth below.
 supabase_admin = (
     _create_supabase_client(_supabase_url, _supabase_service_key)
     if _supabase_url and _supabase_service_key
+    else None
+)
+# Dedicated anon client for user sign-in only. Its auth/postgrest state is never
+# used for table operations, so concurrent sign-ins clobbering it is harmless.
+supabase_auth = (
+    _create_supabase_client(_supabase_url, _supabase_anon_key)
+    if _supabase_url and _supabase_anon_key
     else None
 )
 
@@ -136,6 +151,36 @@ def _check_tools_auth(request: Request) -> None:
     provided = request.headers.get("x-tools-secret", "")
     if not hmac.compare_digest(provided, _TOOLS_WEBHOOK_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _assert_safe_scrape_url(url: str) -> None:
+    """Block SSRF: only allow http(s) to public hosts.
+
+    Rejects non-http schemes and any hostname that resolves to a private,
+    loopback, link-local, or otherwise reserved IP (e.g. cloud metadata at
+    169.254.169.254). Raises HTTPException(422) on a disallowed URL.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=422, detail="URL must use http or https")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=422, detail="URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 80, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise HTTPException(status_code=422, detail="Could not resolve host")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise HTTPException(status_code=422, detail="URL resolves to a disallowed address")
 
 # ---------------------------------------------------------------------------
 # Call status store — Supabase-backed, in-memory fallback for local dev
@@ -445,13 +490,17 @@ def auth_register(req: RegisterRequest) -> JSONResponse:
             pass
         raise HTTPException(status_code=500, detail=f"Could not save user: {e}")
 
+    if not supabase_auth:
+        raise HTTPException(status_code=503, detail="Supabase auth not configured")
     try:
-        sign_in = supabase_admin.auth.sign_in_with_password({"email": req.email, "password": req.password})
+        sign_in = supabase_auth.auth.sign_in_with_password({"email": req.email, "password": req.password})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     return JSONResponse({
         "access_token": sign_in.session.access_token,
+        "refresh_token": sign_in.session.refresh_token,
+        "expires_in": sign_in.session.expires_in,
         "user": {"id": str(user.id), "email": req.email},
         "has_payment_method": False,
     })
@@ -459,10 +508,10 @@ def auth_register(req: RegisterRequest) -> JSONResponse:
 
 @app.post("/auth/login")
 def auth_login(req: LoginRequest) -> JSONResponse:
-    if not supabase_admin:
+    if not supabase_admin or not supabase_auth:
         raise HTTPException(status_code=503, detail="Supabase not configured")
     try:
-        resp = supabase_admin.auth.sign_in_with_password({"email": req.email, "password": req.password})
+        resp = supabase_auth.auth.sign_in_with_password({"email": req.email, "password": req.password})
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -479,6 +528,8 @@ def auth_login(req: LoginRequest) -> JSONResponse:
 
     return JSONResponse({
         "access_token": resp.session.access_token,
+        "refresh_token": resp.session.refresh_token,
+        "expires_in": resp.session.expires_in,
         "user": {"id": str(user.id), "email": user.email},
         "has_payment_method": has_payment_method,
     })
@@ -763,15 +814,26 @@ async def twilio_incoming(request: Request) -> Response:
 # Scrape endpoint
 # ---------------------------------------------------------------------------
 
+def _safe_get(url: str, max_redirects: int = 5) -> "_requests.Response":
+    """GET following redirects manually, re-validating every hop against SSRF."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ShyOrder/1.0)"}
+    for _ in range(max_redirects + 1):
+        _assert_safe_scrape_url(url)
+        resp = _requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+        if resp.is_redirect and resp.headers.get("Location"):
+            url = urljoin(url, resp.headers["Location"])
+            continue
+        return resp
+    raise HTTPException(status_code=502, detail="Too many redirects")
+
+
 @app.post("/scrape")
 def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
     try:
-        resp = _requests.get(
-            req.url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ShyOrder/1.0)"},
-            timeout=10,
-        )
+        resp = _safe_get(req.url)
         resp.raise_for_status()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {e}")
 
