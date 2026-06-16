@@ -12,3 +12,4 @@ beautifulsoup4<5
 supabase<3
 stripe<13
 twilio<10
+anthropic<1

@@ -13,6 +13,7 @@ from urllib.parse import quote, urljoin, urlparse
 import requests as _requests
 import stripe as _stripe
 import uvicorn
+from anthropic import Anthropic
 from twilio.request_validator import RequestValidator as TwilioRequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
@@ -60,6 +61,10 @@ supabase_auth = (
 )
 
 _stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+_anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+_anthropic_client = Anthropic(api_key=_anthropic_api_key) if _anthropic_api_key else None
+_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 _twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
 _twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -356,57 +361,65 @@ client_tools.register("check_call_status", check_call_status_tool)
 # Scraping helpers
 # ---------------------------------------------------------------------------
 
-def _scrape_name(soup: BeautifulSoup) -> str | None:
-    og = soup.find("meta", property="og:title")
-    if og and og.get("content"):
-        return og["content"].strip()
-    if soup.title and soup.title.string:
-        return soup.title.string.strip()
-    h1 = soup.find("h1")
-    if h1:
-        return h1.get_text(strip=True)
-    return None
+_EXTRACT_RESTAURANT_INFO_TOOL = {
+    "name": "extract_restaurant_info",
+    "description": "Record the restaurant's name, phone number, address, and opening hours found on the page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": ["string", "null"]},
+            "phone_number": {
+                "type": ["string", "null"],
+                "description": "E.164 format if the country can be determined, otherwise exactly as written on the page.",
+            },
+            "address": {"type": ["string", "null"]},
+            "hours": {"type": ["string", "null"]},
+        },
+        "required": ["name", "phone_number", "address", "hours"],
+    },
+}
 
 
-def _scrape_phone(soup: BeautifulSoup) -> str | None:
-    tel_link = soup.find("a", href=re.compile(r"^tel:"))
-    if tel_link:
-        return tel_link["href"].replace("tel:", "").strip()
-    text = soup.get_text(" ")
-    for pattern in [
-        r"\+39[\s\-\.]?\d{2,4}[\s\-\.]?\d{4,8}",
-        r"\b0\d{1,3}[\s\-\.]?\d{6,8}\b",
-        r"\b3\d{2}[\s\-\.]?\d{6,7}\b",
-    ]:
-        m = re.search(pattern, text)
-        if m:
-            return re.sub(r"\s+", " ", m.group()).strip()
-    return None
+def _visible_text(soup: BeautifulSoup, max_chars: int = 8000) -> str:
+    """Strip non-content tags and collapse whitespace, keeping the page within a token budget."""
+    for tag in soup(["script", "style", "noscript", "svg", "img"]):
+        tag.decompose()
+    text = soup.get_text("\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text[:max_chars]
 
 
-def _scrape_address(soup: BeautifulSoup) -> str | None:
-    el = soup.find(attrs={"itemprop": "streetAddress"})
-    if el:
-        return el.get_text(strip=True)
-    addr = soup.find("address")
-    if addr:
-        return addr.get_text(" ", strip=True)
-    for term in ["address", "indirizzo", "location"]:
-        el = soup.find(class_=re.compile(term, re.I))
-        if el:
-            return el.get_text(" ", strip=True)
-    return None
+def _extract_restaurant_info(page_text: str) -> dict:
+    """Use an LLM to pull structured restaurant info out of arbitrary page text.
 
+    Heuristics (regex on raw HTML) broke on any layout that didn't match the
+    handful of patterns we'd anticipated. A forced tool call gives the same
+    strict shape with far better real-world coverage, at the cost of one
+    small LLM call per scrape.
+    """
+    if not _anthropic_client:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+    try:
+        resp = _anthropic_client.messages.create(
+            model=_ANTHROPIC_MODEL,
+            max_tokens=300,
+            tools=[_EXTRACT_RESTAURANT_INFO_TOOL],
+            tool_choice={"type": "tool", "name": "extract_restaurant_info"},
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Extract this restaurant's contact details from the page content below. "
+                    f"Use null for any field you can't find.\n\n{page_text}"
+                ),
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Extraction error: {e}")
 
-def _scrape_hours(soup: BeautifulSoup) -> str | None:
-    els = soup.find_all(attrs={"itemprop": "openingHours"})
-    if els:
-        return ", ".join(el.get("content") or el.get_text(strip=True) for el in els)
-    for term in ["hours", "orari", "opening"]:
-        el = soup.find(class_=re.compile(term, re.I)) or soup.find(id=re.compile(term, re.I))
-        if el:
-            return el.get_text(" ", strip=True)[:300]
-    return None
+    for block in resp.content:
+        if block.type == "tool_use":
+            return block.input
+    raise HTTPException(status_code=502, detail="Extraction failed: no structured output returned")
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -838,12 +851,8 @@ def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {e}")
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    return JSONResponse({
-        "name":         _scrape_name(soup),
-        "phone_number": _scrape_phone(soup),
-        "address":      _scrape_address(soup),
-        "hours":        _scrape_hours(soup),
-    })
+    info = _extract_restaurant_info(_visible_text(soup))
+    return JSONResponse(info)
 
 # ---------------------------------------------------------------------------
 # Tools webhook
