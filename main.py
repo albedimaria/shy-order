@@ -1,6 +1,7 @@
 import argparse
 import hmac
 import ipaddress
+import json
 import math
 import os
 import re
@@ -13,7 +14,7 @@ from urllib.parse import quote, urljoin, urlparse
 import requests as _requests
 import stripe as _stripe
 import uvicorn
-from anthropic import Anthropic
+from openai import OpenAI
 from twilio.request_validator import RequestValidator as TwilioRequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
@@ -62,9 +63,9 @@ supabase_auth = (
 
 _stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 
-_anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
-_anthropic_client = Anthropic(api_key=_anthropic_api_key) if _anthropic_api_key else None
-_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+_openai_api_key = os.getenv("OPENAI_API_KEY", "")
+_openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
+_OPENAI_MODEL = "gpt-4.1-mini"
 
 _twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
 _twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -362,22 +363,35 @@ client_tools.register("check_call_status", check_call_status_tool)
 # ---------------------------------------------------------------------------
 
 _EXTRACT_RESTAURANT_INFO_TOOL = {
-    "name": "extract_restaurant_info",
-    "description": "Record the restaurant's name, phone number, address, and opening hours found on the page.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "name": {"type": ["string", "null"]},
-            "phone_number": {
-                "type": ["string", "null"],
-                "description": "E.164 format if the country can be determined, otherwise exactly as written on the page.",
+    "type": "function",
+    "function": {
+        "name": "extract_restaurant_info",
+        "description": "Record the restaurant's name, phone number, address, and opening hours found on the page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": ["string", "null"]},
+                "phone_number": {
+                    "type": ["string", "null"],
+                    "description": "E.164 format if the country can be determined, otherwise exactly as written on the page.",
+                },
+                "address": {"type": ["string", "null"]},
+                "hours": {"type": ["string", "null"]},
             },
-            "address": {"type": ["string", "null"]},
-            "hours": {"type": ["string", "null"]},
+            "required": ["name", "phone_number", "address", "hours"],
+            "additionalProperties": False,
         },
-        "required": ["name", "phone_number", "address", "hours"],
     },
 }
+
+
+def _tel_hrefs(soup: BeautifulSoup) -> list[str]:
+    """Collect tel: link targets, which carry the E.164 number get_text() would otherwise lose."""
+    return [
+        a["href"].replace("tel:", "").strip()
+        for a in soup.find_all("a", href=re.compile(r"^tel:"))
+        if a.get("href", "").replace("tel:", "").strip()
+    ]
 
 
 def _visible_text(soup: BeautifulSoup, max_chars: int = 8000) -> str:
@@ -389,37 +403,43 @@ def _visible_text(soup: BeautifulSoup, max_chars: int = 8000) -> str:
     return text[:max_chars]
 
 
-def _extract_restaurant_info(page_text: str) -> dict:
+def _extract_restaurant_info(page_text: str, tel_hints: list[str] | None = None) -> dict:
     """Use an LLM to pull structured restaurant info out of arbitrary page text.
 
     Heuristics (regex on raw HTML) broke on any layout that didn't match the
     handful of patterns we'd anticipated. A forced tool call gives the same
     strict shape with far better real-world coverage, at the cost of one
     small LLM call per scrape.
+
+    tel_hints carries tel: link targets separately: get_text() drops href
+    attributes, so a page whose visible text shows "06 1234 5678" but whose
+    tel: link is "tel:+390612345678" would otherwise lose the only E.164
+    copy of the number — and make_restaurant_call requires E.164.
     """
-    if not _anthropic_client:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+    if not _openai_client:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
+    hints = f"\n\ntel: links found on the page: {', '.join(tel_hints)}" if tel_hints else ""
     try:
-        resp = _anthropic_client.messages.create(
-            model=_ANTHROPIC_MODEL,
-            max_tokens=300,
+        resp = _openai_client.chat.completions.create(
+            model=_OPENAI_MODEL,
             tools=[_EXTRACT_RESTAURANT_INFO_TOOL],
-            tool_choice={"type": "tool", "name": "extract_restaurant_info"},
+            tool_choice={"type": "function", "function": {"name": "extract_restaurant_info"}},
             messages=[{
                 "role": "user",
                 "content": (
                     "Extract this restaurant's contact details from the page content below. "
-                    f"Use null for any field you can't find.\n\n{page_text}"
+                    "Prefer a tel: link's number (already E.164) over a phone number as written in "
+                    f"the visible text. Use null for any field you can't find.\n\n{page_text}{hints}"
                 ),
             }],
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Extraction error: {e}")
 
-    for block in resp.content:
-        if block.type == "tool_use":
-            return block.input
-    raise HTTPException(status_code=502, detail="Extraction failed: no structured output returned")
+    tool_calls = resp.choices[0].message.tool_calls
+    if not tool_calls:
+        raise HTTPException(status_code=502, detail="Extraction failed: no structured output returned")
+    return json.loads(tool_calls[0].function.arguments)
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -851,7 +871,8 @@ def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {e}")
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    info = _extract_restaurant_info(_visible_text(soup))
+    tel_hints = _tel_hrefs(soup)
+    info = _extract_restaurant_info(_visible_text(soup), tel_hints)
     return JSONResponse(info)
 
 # ---------------------------------------------------------------------------

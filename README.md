@@ -181,12 +181,12 @@ python main.py --local
 
 See [`.env.example`](.env.example). Notably:
 
-- `ANTHROPIC_API_KEY` — powers the restaurant-info extraction in `/scrape`.
+- `OPENAI_API_KEY` — powers the restaurant-info extraction in `/scrape`.
 - `TWILIO_OVERRIDE_TO` — redirects every outbound call to a fixed test number; unset only when actually calling real restaurants.
 - `TOOLS_WEBHOOK_SECRET` — shared secret the ElevenLabs agent sends back on every `/tools` call.
 
 ## Stack
 
-Python · FastAPI · ElevenLabs Conversational AI · Twilio · Supabase (Postgres + Auth) · Stripe · Anthropic (restaurant-info extraction) · deployed on Render.
+Python · FastAPI · ElevenLabs Conversational AI · Twilio · Supabase (Postgres + Auth) · Stripe · OpenAI (restaurant-info extraction) · deployed on Render.
 
 A companion analytics dashboard (Next.js, separate repo) reads the same Supabase project.
