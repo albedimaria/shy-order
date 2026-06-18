@@ -2,6 +2,7 @@ import argparse
 import hmac
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -35,6 +36,45 @@ load_dotenv()
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 
 _E164_RE = re.compile(r"^\+\d{7,15}$")
+
+# ---------------------------------------------------------------------------
+# Structured logging
+# ---------------------------------------------------------------------------
+# One JSON line per event so Render's log drain stays grep-/jq-friendly. The
+# point is to stop swallowing failures silently: every caught-and-ignored
+# exception below now emits a WARNING with enough context (tool, call_sid,
+# session_id) to debug a production voice call after the fact.
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "event": record.getMessage(),
+        }
+        payload.update(getattr(record, "extra_fields", {}))
+        if record.exc_info:
+            payload["error"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def _setup_logging() -> logging.Logger:
+    logger = logging.getLogger("shyorder")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(_JsonFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+        logger.propagate = False
+    return logger
+
+
+log = _setup_logging()
+
+
+def _log(level: int, event: str, exc: bool = False, **fields) -> None:
+    """Emit one structured log line; `fields` become top-level JSON keys."""
+    log.log(level, event, exc_info=exc, extra={"extra_fields": fields})
 
 # ---------------------------------------------------------------------------
 # External clients
@@ -76,7 +116,14 @@ _twilio_client = (
     else None
 )
 
-_RAILWAY_BASE_URL     = os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
+# Public base URL Twilio reaches us at (used to build webhook URLs and to
+# reconstruct the URL for Twilio signature validation). Deployment moved from
+# Railway to Render; PUBLIC_BASE_URL is the current name, RAILWAY_PUBLIC_URL is
+# still honored for back-compat with any existing env config.
+_PUBLIC_BASE_URL      = os.getenv("PUBLIC_BASE_URL") or os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
+# Where Google OAuth returns the user. The voice frontend is served both by this
+# app (at /) and at the Vercel URL below; the redirect lands on the Vercel copy,
+# which talks to the same backend. Override with FRONTEND_URL if needed.
 _FRONTEND_URL         = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
 _TOOLS_WEBHOOK_SECRET = os.getenv("TOOLS_WEBHOOK_SECRET", "")
 # Override all outbound calls to a fixed number (e.g. for Twilio trial testing).
@@ -135,13 +182,19 @@ def _is_e164(phone: str) -> bool:
     return bool(_E164_RE.match(phone))
 
 
+def _compute_charge_cents(duration_seconds: int) -> int:
+    """Billing: €0.20 base + €0.15 per started minute (rounded up). Minimum 1 minute."""
+    minutes = math.ceil(max(1, duration_seconds) / 60)
+    return minutes * 15 + 20
+
+
 def _validate_twilio_sig(request: Request, params: dict) -> None:
     """Reject requests not signed by Twilio. No-op if auth token not configured."""
     if not _twilio_auth_token:
         return
     path = request.url.path
     query = str(request.url.query)
-    url = f"{_RAILWAY_BASE_URL}{path}"
+    url = f"{_PUBLIC_BASE_URL}{path}"
     if query:
         url += f"?{query}"
     validator = TwilioRequestValidator(_twilio_auth_token)
@@ -189,6 +242,55 @@ def _assert_safe_scrape_url(url: str) -> None:
             raise HTTPException(status_code=422, detail="URL resolves to a disallowed address")
 
 # ---------------------------------------------------------------------------
+# Latency / outcome telemetry — the round-trips we own (see migration 004)
+# ---------------------------------------------------------------------------
+# ElevenLabs owns the audio/ASR/TTS/turn-taking, so we can't time those. What
+# we CAN time: each tool webhook round-trip, the scrape (fetch + OpenAI), the
+# ElevenLabs token fetch, and the Twilio call outcome. _track logs one JSON line
+# and persists one tool_metrics row per operation, best-effort.
+
+def _persist_metric(tool: str, duration_ms: float, outcome: str, ctx: dict) -> None:
+    """Best-effort insert into tool_metrics; never breaks the request it measures."""
+    if not supabase_admin:
+        return
+    try:
+        supabase_admin.table("tool_metrics").insert({
+            "tool": tool,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+            "call_sid": ctx.get("call_sid"),
+            "conversation_id": ctx.get("conversation_id") or None,
+        }).execute()
+    except Exception:
+        _log(logging.WARNING, "tool_metric_persist_failed", exc=True, tool=tool)
+
+
+class _track:
+    """Context manager: time a block, log it as JSON, persist it to tool_metrics.
+
+    Set `.outcome` or update `.ctx` inside the block to enrich the row (e.g. the
+    Twilio terminal status, the resulting call_sid). An exception marks the
+    outcome 'error' and is re-raised.
+    """
+    def __init__(self, tool: str, **ctx):
+        self.tool = tool
+        self.ctx = ctx
+        self.outcome = "ok"
+
+    def __enter__(self) -> "_track":
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        duration_ms = round((time.perf_counter() - self._start) * 1000, 1)
+        if exc_type is not None:
+            self.outcome = "error"
+        _log(logging.INFO, "tool_metric", tool=self.tool,
+             duration_ms=duration_ms, outcome=self.outcome, **self.ctx)
+        _persist_metric(self.tool, duration_ms, self.outcome, self.ctx)
+        return False
+
+# ---------------------------------------------------------------------------
 # Call status store — Supabase-backed, in-memory fallback for local dev
 # ---------------------------------------------------------------------------
 
@@ -200,7 +302,7 @@ def _get_call_status(call_sid: str) -> str | None:
                 return result.data[0]["status"]
             return None
         except Exception:
-            pass
+            _log(logging.WARNING, "call_status_read_failed", exc=True, call_sid=call_sid)
     return _call_statuses_mem.get(call_sid)
 
 
@@ -214,7 +316,7 @@ def _set_call_status(call_sid: str, status: str) -> None:
             }).execute()
             return
         except Exception:
-            pass
+            _log(logging.WARNING, "call_status_write_failed", exc=True, call_sid=call_sid, status=status)
     _call_statuses_mem[call_sid] = status
 
 # ---------------------------------------------------------------------------
@@ -260,7 +362,7 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
                 "address": r.get("address", ""),
             }
     except Exception:
-        pass
+        _log(logging.WARNING, "restaurant_lookup_failed", exc=True, name=name_query)
     return {"found": False}
 
 
@@ -293,14 +395,14 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
     # Trial mode: redirect all outbound calls to a fixed test number
     dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
 
-    webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
+    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
 
     try:
         call = _twilio_client.calls.create(
             to=dial_to,
             from_=_twilio_phone_number,
             url=webhook_url,
-            status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
+            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
             status_callback_method="POST",
         )
     except Exception as e:
@@ -316,7 +418,7 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
                 "increment_restaurant_call_count", {"p_name": restaurant_name}
             ).execute()
         except Exception:
-            pass
+            _log(logging.WARNING, "restaurant_call_count_increment_failed", exc=True, restaurant_name=restaurant_name)
         # Link restaurant to the current session (if conversation_id was supplied)
         if conversation_id:
             try:
@@ -324,7 +426,8 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
                     {"restaurant_name": restaurant_name}
                 ).eq("elevenlabs_conversation_id", conversation_id).execute()
             except Exception:
-                pass
+                _log(logging.WARNING, "session_restaurant_link_failed", exc=True,
+                     conversation_id=conversation_id, restaurant_name=restaurant_name)
 
     terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
     deadline = time.time() + 60
@@ -450,7 +553,7 @@ app = FastAPI()
 _allowed_origins = [
     o.strip() for o in os.getenv(
         "ALLOWED_ORIGINS",
-        f"{_FRONTEND_URL},{_RAILWAY_BASE_URL}",
+        f"{_FRONTEND_URL},{_PUBLIC_BASE_URL}",
     ).split(",") if o.strip()
 ]
 
@@ -460,6 +563,25 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    """One structured access-log line per request, with server-side latency.
+
+    This is the latency we own end to end (request in → response out). Note that
+    /tools/make_restaurant_call will legitimately show ~60s here: that's the
+    backend blocking on the phone call, by design (see make_restaurant_call_tool).
+    """
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start) * 1000, 1)
+    _log(
+        logging.INFO, "http_request",
+        method=request.method, path=request.url.path,
+        status=response.status_code, duration_ms=duration_ms,
+    )
+    return response
 
 # ---------------------------------------------------------------------------
 # Static files
@@ -557,7 +679,7 @@ def auth_login(req: LoginRequest) -> JSONResponse:
             pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
             has_payment_method = len(pms.data) > 0
     except Exception:
-        pass
+        _log(logging.WARNING, "login_payment_lookup_failed", exc=True, user_id=str(user.id))
 
     return JSONResponse({
         "access_token": resp.session.access_token,
@@ -607,6 +729,7 @@ def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
         pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
         return JSONResponse({"has_payment_method": len(pms.data) > 0})
     except Exception:
+        _log(logging.WARNING, "google_pm_lookup_failed", exc=True, user_id=str(user.id))
         return JSONResponse({"has_payment_method": False})
 
 # ---------------------------------------------------------------------------
@@ -671,15 +794,16 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
     if not api_key:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
     try:
-        resp = _requests.get(
-            "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
-            headers={"xi-api-key": api_key},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
+        with _track("elevenlabs_token:session_start"):
+            resp = _requests.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/token",
+                params={"agent_id": AGENT_ID},
+                headers={"xi-api-key": api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"ElevenLabs error: {e}")
 
@@ -692,7 +816,7 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     try:
         session_rec = (
             supabase_admin.table("sessions")
-            .select("started_at")
+            .select("started_at, ended_at, duration_seconds, amount_charged")
             .eq("id", req.session_id)
             .eq("user_id", str(user.id))
             .single()
@@ -701,11 +825,20 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Idempotency guard: if this session was already closed, return what it was
+    # charged instead of charging again. The frontend already guards against a
+    # double-fire, but a retry / second tab / network retry must not double-bill.
+    if session_rec.data.get("ended_at"):
+        return JSONResponse({
+            "amount_charged": session_rec.data.get("amount_charged") or 0,
+            "duration_seconds": session_rec.data.get("duration_seconds") or 0,
+            "already_ended": True,
+        })
+
     started_at = datetime.fromisoformat(session_rec.data["started_at"].replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     duration_seconds = max(1, int((now - started_at).total_seconds()))
-    minutes = math.ceil(duration_seconds / 60)
-    amount_cents = minutes * 15 + 20
+    amount_cents = _compute_charge_cents(duration_seconds)
 
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
@@ -727,6 +860,9 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
             payment_method=pm_id,
             confirm=True,
             off_session=True,
+            # Stripe dedupes by this key, so a retried/concurrent /session/end for
+            # the same session reuses the original PaymentIntent instead of charging twice.
+            idempotency_key=f"session-end-{req.session_id}",
         )
         pi_id = payment_intent.id
     except _stripe.error.CardError as e:
@@ -734,12 +870,18 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    supabase_admin.table("sessions").update({
-        "ended_at": now.isoformat(),
-        "duration_seconds": duration_seconds,
-        "amount_charged": amount_cents,
-        "stripe_payment_intent_id": pi_id,
-    }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+    try:
+        supabase_admin.table("sessions").update({
+            "ended_at": now.isoformat(),
+            "duration_seconds": duration_seconds,
+            "amount_charged": amount_cents,
+            "stripe_payment_intent_id": pi_id,
+        }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+    except Exception:
+        # The charge already went through — if we can't record it, log loudly so
+        # the orphaned charge is recoverable (the idempotency key prevents a re-charge).
+        _log(logging.ERROR, "session_end_update_failed_after_charge", exc=True,
+             session_id=req.session_id, payment_intent_id=pi_id, amount_charged=amount_cents)
 
     return JSONResponse({"amount_charged": amount_cents, "duration_seconds": duration_seconds})
 
@@ -768,7 +910,7 @@ def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse
     if not _is_e164(req.to):
         raise HTTPException(status_code=422, detail="'to' must be E.164 format (e.g. +390612345678)")
 
-    webhook_url = f"{_RAILWAY_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
+    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
     dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else req.to
 
     try:
@@ -776,7 +918,7 @@ def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse
             to=dial_to,
             from_=_twilio_phone_number,
             url=webhook_url,
-            status_callback=f"{_RAILWAY_BASE_URL}/twilio/status",
+            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
             status_callback_method="POST",
         )
     except Exception as e:
@@ -815,21 +957,29 @@ async def twilio_incoming(request: Request) -> Response:
     # Fetch a short-lived signed token to avoid exposing the API key in TwiML
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
     ws_url = None
-    try:
-        resp = _requests.get(
-            "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
-            headers={"xi-api-key": api_key},
-            timeout=5,
-        )
-        if resp.ok:
-            token = resp.json().get("token")
-            if token:
-                ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
-    except Exception:
-        pass
+    with _track("elevenlabs_token:twilio") as t:
+        try:
+            resp = _requests.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/token",
+                params={"agent_id": AGENT_ID},
+                headers={"xi-api-key": api_key},
+                timeout=5,
+            )
+            if resp.ok:
+                token = resp.json().get("token")
+                if token:
+                    ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
+            else:
+                t.outcome = f"http_{resp.status_code}"
+                _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
+        except Exception:
+            t.outcome = "error"
+            _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
 
     if not ws_url:
+        # The call is already ringing; without a token we can only apologise and
+        # hang up. This path used to be silent — now it's logged loudly above.
+        _log(logging.ERROR, "twilio_incoming_no_ws_url", restaurant_name=restaurant_name)
         error_twiml = VoiceResponse()
         error_twiml.say("Si è verificato un errore tecnico. Riprova più tardi.", language="it-IT")
         error_twiml.hangup()
@@ -863,8 +1013,9 @@ def _safe_get(url: str, max_redirects: int = 5) -> "_requests.Response":
 @app.post("/scrape")
 def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
     try:
-        resp = _safe_get(req.url)
-        resp.raise_for_status()
+        with _track("scrape:fetch"):
+            resp = _safe_get(req.url)
+            resp.raise_for_status()
     except HTTPException:
         raise
     except Exception as e:
@@ -872,7 +1023,8 @@ def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     tel_hints = _tel_hrefs(soup)
-    info = _extract_restaurant_info(_visible_text(soup), tel_hints)
+    with _track("scrape:extract"):
+        info = _extract_restaurant_info(_visible_text(soup), tel_hints)
     return JSONResponse(info)
 
 # ---------------------------------------------------------------------------
@@ -883,7 +1035,14 @@ def _run_tool(tool_name: str, parameters: dict) -> JSONResponse:
     handler = TOOL_REGISTRY.get(tool_name)
     if handler is None:
         raise HTTPException(status_code=404, detail=f"Unknown tool: '{tool_name}'")
-    return JSONResponse(handler(parameters))
+    with _track(f"tool:{tool_name}", conversation_id=parameters.get("__conversation_id__", "")) as t:
+        result = handler(parameters)
+        if isinstance(result, dict):
+            # Surface the call's terminal status (or an error) as the metric outcome.
+            t.outcome = result.get("status") or ("error" if result.get("error") else "ok")
+            if result.get("call_sid"):
+                t.ctx["call_sid"] = result["call_sid"]
+        return JSONResponse(result)
 
 
 @app.post("/tools")
@@ -901,7 +1060,15 @@ def tools_webhook(request: Request, payload: dict) -> JSONResponse:
 @app.post("/tools/{tool_name}")
 def tools_by_path(tool_name: str, request: Request, payload: dict | None = None) -> JSONResponse:
     _check_tools_auth(request)
-    parameters = (payload or {}).get("parameters", payload or {})
+    payload = payload or {}
+    # ElevenLabs path-based tools POST the params at the top level (no "parameters"
+    # wrapper), so fall back to the whole body. Inject __conversation_id__ the same
+    # way the body-based /tools handler does — without this, make_restaurant_call
+    # never receives it and sessions.restaurant_name is never linked.
+    parameters = dict(payload.get("parameters", payload))
+    parameters["__conversation_id__"] = (
+        payload.get("conversation_id") or parameters.get("conversation_id") or ""
+    )
     return _run_tool(tool_name, parameters)
 
 # ---------------------------------------------------------------------------
