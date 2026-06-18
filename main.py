@@ -229,6 +229,55 @@ def _assert_safe_scrape_url(url: str) -> None:
             raise HTTPException(status_code=422, detail="URL resolves to a disallowed address")
 
 # ---------------------------------------------------------------------------
+# Latency / outcome telemetry — the round-trips we own (see migration 004)
+# ---------------------------------------------------------------------------
+# ElevenLabs owns the audio/ASR/TTS/turn-taking, so we can't time those. What
+# we CAN time: each tool webhook round-trip, the scrape (fetch + OpenAI), the
+# ElevenLabs token fetch, and the Twilio call outcome. _track logs one JSON line
+# and persists one tool_metrics row per operation, best-effort.
+
+def _persist_metric(tool: str, duration_ms: float, outcome: str, ctx: dict) -> None:
+    """Best-effort insert into tool_metrics; never breaks the request it measures."""
+    if not supabase_admin:
+        return
+    try:
+        supabase_admin.table("tool_metrics").insert({
+            "tool": tool,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+            "call_sid": ctx.get("call_sid"),
+            "conversation_id": ctx.get("conversation_id") or None,
+        }).execute()
+    except Exception:
+        _log(logging.WARNING, "tool_metric_persist_failed", exc=True, tool=tool)
+
+
+class _track:
+    """Context manager: time a block, log it as JSON, persist it to tool_metrics.
+
+    Set `.outcome` or update `.ctx` inside the block to enrich the row (e.g. the
+    Twilio terminal status, the resulting call_sid). An exception marks the
+    outcome 'error' and is re-raised.
+    """
+    def __init__(self, tool: str, **ctx):
+        self.tool = tool
+        self.ctx = ctx
+        self.outcome = "ok"
+
+    def __enter__(self) -> "_track":
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        duration_ms = round((time.perf_counter() - self._start) * 1000, 1)
+        if exc_type is not None:
+            self.outcome = "error"
+        _log(logging.INFO, "tool_metric", tool=self.tool,
+             duration_ms=duration_ms, outcome=self.outcome, **self.ctx)
+        _persist_metric(self.tool, duration_ms, self.outcome, self.ctx)
+        return False
+
+# ---------------------------------------------------------------------------
 # Call status store — Supabase-backed, in-memory fallback for local dev
 # ---------------------------------------------------------------------------
 
@@ -732,15 +781,16 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
     if not api_key:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
     try:
-        resp = _requests.get(
-            "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
-            headers={"xi-api-key": api_key},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
+        with _track("elevenlabs_token:session_start"):
+            resp = _requests.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/token",
+                params={"agent_id": AGENT_ID},
+                headers={"xi-api-key": api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"ElevenLabs error: {e}")
 
@@ -895,21 +945,24 @@ async def twilio_incoming(request: Request) -> Response:
     # Fetch a short-lived signed token to avoid exposing the API key in TwiML
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
     ws_url = None
-    try:
-        resp = _requests.get(
-            "https://api.elevenlabs.io/v1/convai/conversation/token",
-            params={"agent_id": AGENT_ID},
-            headers={"xi-api-key": api_key},
-            timeout=5,
-        )
-        if resp.ok:
-            token = resp.json().get("token")
-            if token:
-                ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
-        else:
-            _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
-    except Exception:
-        _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
+    with _track("elevenlabs_token:twilio") as t:
+        try:
+            resp = _requests.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/token",
+                params={"agent_id": AGENT_ID},
+                headers={"xi-api-key": api_key},
+                timeout=5,
+            )
+            if resp.ok:
+                token = resp.json().get("token")
+                if token:
+                    ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
+            else:
+                t.outcome = f"http_{resp.status_code}"
+                _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
+        except Exception:
+            t.outcome = "error"
+            _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
 
     if not ws_url:
         # The call is already ringing; without a token we can only apologise and
@@ -948,8 +1001,9 @@ def _safe_get(url: str, max_redirects: int = 5) -> "_requests.Response":
 @app.post("/scrape")
 def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
     try:
-        resp = _safe_get(req.url)
-        resp.raise_for_status()
+        with _track("scrape:fetch"):
+            resp = _safe_get(req.url)
+            resp.raise_for_status()
     except HTTPException:
         raise
     except Exception as e:
@@ -957,7 +1011,8 @@ def scrape(req: ScrapeRequest, user=Depends(_get_user)) -> JSONResponse:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     tel_hints = _tel_hrefs(soup)
-    info = _extract_restaurant_info(_visible_text(soup), tel_hints)
+    with _track("scrape:extract"):
+        info = _extract_restaurant_info(_visible_text(soup), tel_hints)
     return JSONResponse(info)
 
 # ---------------------------------------------------------------------------
@@ -968,7 +1023,14 @@ def _run_tool(tool_name: str, parameters: dict) -> JSONResponse:
     handler = TOOL_REGISTRY.get(tool_name)
     if handler is None:
         raise HTTPException(status_code=404, detail=f"Unknown tool: '{tool_name}'")
-    return JSONResponse(handler(parameters))
+    with _track(f"tool:{tool_name}", conversation_id=parameters.get("__conversation_id__", "")) as t:
+        result = handler(parameters)
+        if isinstance(result, dict):
+            # Surface the call's terminal status (or an error) as the metric outcome.
+            t.outcome = result.get("status") or ("error" if result.get("error") else "ok")
+            if result.get("call_sid"):
+                t.ctx["call_sid"] = result["call_sid"]
+        return JSONResponse(result)
 
 
 @app.post("/tools")
