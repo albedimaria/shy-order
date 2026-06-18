@@ -246,7 +246,7 @@ def get_or_create_restaurant(name: str, phone_number: str, address: str) -> dict
 # ---------------------------------------------------------------------------
 
 def lookup_restaurant_tool(parameters: dict) -> dict:
-    name_query = parameters.get("name", "").strip()
+    name_query = (parameters.get("restaurant_name") or parameters.get("name") or "").strip()
     if not supabase_admin or not name_query:
         return {"found": False}
     try:
@@ -267,7 +267,7 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
 def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
     try:
         return get_or_create_restaurant(
-            name=parameters.get("name", ""),
+            name=(parameters.get("restaurant_name") or parameters.get("name") or ""),
             phone_number=parameters.get("phone_number", ""),
             address=parameters.get("address", ""),
         )
