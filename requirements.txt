@@ -13,3 +13,8 @@ supabase<3
 stripe<13
 twilio<10
 openai<2
+# Required by Starlette/FastAPI to parse form-encoded bodies — the Twilio
+# webhooks (/twilio/status, /twilio/incoming) do `await request.form()`, which
+# raises (HTTP 500) without this. Its absence silently broke the whole call
+# pipeline on the Render deploy until an end-to-end call test caught it.
+python-multipart<1
