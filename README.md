@@ -136,6 +136,7 @@ Four tables, created by [`migrations/`](migrations/):
 | `sessions` | `id`, `user_id`, `started_at`, `ended_at`, `duration_seconds`, `amount_charged` (€ cents), `stripe_payment_intent_id`, `restaurant_name`, `elevenlabs_conversation_id` | SELECT own sessions |
 | `restaurants` | `id` (SERIAL), `name` (UNIQUE, case-insensitive index), `phone_number`, `address`, `call_count` | service-role only |
 | `call_statuses` | `call_sid` (PK), `status`, `updated_at` | service-role only |
+| `tool_metrics` | `id`, `tool`, `duration_ms`, `outcome`, `call_sid`, `conversation_id`, `created_at` | service-role only |
 
 All backend access goes through a service-role Supabase client (bypasses RLS). A separate anon client is used only for `sign_in_with_password` — see [Security notes](#security-notes-worth-knowing-before-reading-the-code).
 
@@ -156,7 +157,7 @@ The agent calls the backend via four registered webhook tools, all `POST` to `/t
 
 The 75s timeout on `make_restaurant_call` is intentional — it has to be longer than the backend's 60s polling window or ElevenLabs will cut the tool call before the backend answers.
 
-Authentication: every inbound `/tools` request is verified with `hmac.compare_digest` against `TOOLS_WEBHOOK_SECRET` (constant-time comparison, set via env var).
+Authentication: every inbound `/tools` request is verified with `hmac.compare_digest` against `TOOLS_WEBHOOK_SECRET` (constant-time comparison, set via env var). On the ElevenLabs side the secret is stored as a workspace secret and sent as the `x-tools-secret` header on each tool. **Caveat (honest):** if `TOOLS_WEBHOOK_SECRET` is unset the check fails *open* (`main.py:_check_tools_auth`) — convenient for local dev, but it means the protection is only real when the env var is actually set on the deploy. It is set in production.
 
 ### Signed URL flow
 
@@ -185,6 +186,8 @@ The alternative would be: return immediately with just a `call_sid`, and have th
 
 Blocking server-side means the *backend* — not the LLM — owns the polling loop. The agent gets a single tool call that returns the actual outcome. The trade-off is that the webhook tool's timeout on the ElevenLabs side must be configured longer than the backend's blocking window (`check_call_status` still exists for the one edge case where 60 seconds wasn't enough).
 
+**Where this stops scaling (honest):** the `/tools/*` routes are sync handlers, so FastAPI runs each in a threadpool (default ~40 workers). A blocking restaurant call therefore holds one thread for up to 60s — fine for a demo and realistic call volumes, but ~40 concurrent in-flight calls would exhaust the pool, and on a single small Render instance the practical ceiling is lower. The "correct at scale" answer is the async pattern this design deliberately traded away (return the `call_sid` immediately, push the outcome back via the status webhook). For this product's scale, the simplicity of one blocking tool call is the right trade; past it, you'd switch.
+
 ---
 
 ## Components
@@ -201,6 +204,10 @@ One FastAPI app, no internal microservices. Routes group into:
 - **Scrape** (`/scrape`) — restaurant info extraction (see below).
 
 There's no job queue and no background worker: the "background" work (waiting for a phone call to finish) happens inside the HTTP request, which is only viable because the wait has a hard ceiling (60s).
+
+### Observability and latency
+
+Every request gets one structured JSON log line (`method`, `path`, `status`, `duration_ms`); every previously-silent `except` now logs with context (`tool`, `call_sid`, `session_id`) so a failed production call is debuggable after the fact. On top of that, a small `_track` context manager records the latency we actually own — ElevenLabs owns the audio/ASR/TTS pipeline, so the measurable surface is the **backend round-trips**: each tool webhook (`tool:make_restaurant_call` etc., tagged with the Twilio terminal status as `outcome`), the scrape (`scrape:fetch` + `scrape:extract`), and the ElevenLabs token fetch. Each is logged and persisted to `tool_metrics` (one row per op, best-effort — a failed metric insert never breaks the request) for the dashboard to chart.
 
 ### Restaurant data: structured extraction, not regex
 
@@ -222,6 +229,8 @@ It's now a single structured-extraction call: the page is fetched (through an SS
 ## Billing
 
 Stripe is configured in **test mode** (`pk_test_…` / `sk_test_…`, confirmed live on the deployed instance via `GET /config`). The full flow — card setup via Stripe Elements, a SetupIntent, a per-minute `PaymentIntent` on session end (`minutes × €0.15 + €0.20`) — runs exactly as it would in production. No real money ever moves; this is the standard way to demo a paid product safely.
+
+`/session/end` is **idempotent**: it bails early if the session already has an `ended_at`, and passes a Stripe idempotency key derived from the `session_id`, so a retry, a second tab, or a network retry can't double-charge. The amount is always computed server-side from stored timestamps, never trusted from the client.
 
 ---
 
@@ -265,6 +274,15 @@ Or talk to the agent directly from the terminal, no browser/Twilio involved:
 ```bash
 python main.py --local
 ```
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The suite is fully offline (no Supabase/Stripe/Twilio calls — those globals are monkeypatched to the no-I/O branch). It covers the high-risk pure logic: E.164 validation, the billing formula, the SSRF guard (private IP / cloud-metadata / non-http, with `getaddrinfo` mocked), `tel:`/visible-text extraction, the tool param-name handling, and the `/tools` auth 401/200 paths.
 
 ### Required environment variables
 
