@@ -224,9 +224,13 @@ The big one — found by actually placing an end-to-end test call:
 - **`python-multipart` was missing** from `requirements.txt`, so the old Twilio webhooks (`await request.form()`) returned HTTP 500 in production — the call would ring but nothing worked. (Moot now that those webhooks are gone, but it's why the old flow failed silently on Render.)
 - Earlier agent-config fixes: `check_call_status` was referenced in the prompt but never registered; its webhook pointed at the wrong method/path; `make_restaurant_call`'s tool timeout was shorter than the backend's wait.
 
-### On ElevenLabs Workflows
+### On ElevenLabs Workflows (and why they're *not* used here)
 
-The two-agent split here is the "subagents" idea done by hand: one persona per agent, the backend orchestrating the handoff. [ElevenLabs Workflows](https://elevenlabs.io/docs/eleven-agents/customization/agent-workflows) would formalize that handoff as an explicit graph (a checkable transition between a *collect* subagent and a *call* subagent) instead of backend glue — a natural next step, built in the dashboard's visual editor.
+[ElevenLabs Workflows](https://elevenlabs.io/docs/eleven-agents/customization/agent-workflows) orchestrate sub-agents **within a single conversation**: a graph the call traverses, with conditional transitions (deterministic or LLM-evaluated), sub-agent handoffs, and transfer to human operators.
+
+This project's two agents don't live in one conversation — they're **two separate conversations** (the browser session and the outbound phone call) bridged by a backend tool call. There's no in-conversation handoff or escalation, so a workflow graph doesn't map onto the split. The "specialised agents instead of one mega-agent" benefit that Workflows is built for is already achieved here at the *architecture* level (two agents + backend orchestration) rather than as an in-conversation graph.
+
+Where Workflows *would* earn their place: if the restaurant-caller needed to **transfer to a human** mid-call, or if the website assistant grew **deterministic phases** to gate (authenticate → collect → confirm) inside its own conversation. Neither is a current need.
 
 ---
 

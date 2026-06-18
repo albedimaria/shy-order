@@ -151,6 +151,17 @@ Le route `/twilio/*` **non esistono più**: la telefonia è tutta dentro l'integ
 > ElevenLabs sta ancora elaborando l'analisi) ritorno `in_progress` e l'agente richiama una volta
 > `check_call_status`."
 
+### 🎤 Se ti chiedono "perché non hai usato ElevenLabs Workflows?"
+
+> "Workflows orchestra sotto-agenti **dentro una singola conversazione**: un grafo che la chiamata
+> attraversa, con transizioni condizionali (deterministiche o valutate dall'LLM), handoff tra
+> sotto-agenti e trasferimento a operatori umani. Qui i miei due agenti **non sono in una
+> conversazione sola** — sono due conversazioni separate (browser e telefonata) legate da una tool
+> call del backend. Non c'è handoff in-call, quindi un grafo non si applica: il beneficio degli
+> 'agenti specializzati' l'ho già a livello di architettura. Lo adotterei subito se il chiamante
+> dovesse **trasferire a un umano** a metà chiamata, o se l'assistente-sito avesse **fasi
+> deterministiche** da forzare (autentica → raccogli → conferma) dentro la sua conversazione."
+
 ---
 
 ## 5. Le decisioni tecniche, una per una (il "perché")
