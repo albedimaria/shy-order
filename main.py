@@ -357,6 +357,50 @@ def _conversation_outcome(conversation_id: str) -> dict:
     }
 
 
+def _persist_call_outcome(conversation_id: str, *, call_sid: str = "",
+                          website_conversation_id: str = "", restaurant_name: str = "") -> None:
+    """Best-effort upsert of the caller conversation's outcome into call_outcomes —
+    the observability source for the call leg. Linkage fields (call_sid,
+    website_conversation_id, restaurant_name) are only written when provided, so a
+    later refresh (check_call_status) updates the analysis without clobbering them.
+    Never breaks the request it's attached to."""
+    if not supabase_admin or not conversation_id:
+        return
+    try:
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        r = _requests.get(
+            f"https://api.elevenlabs.io/v1/convai/conversations/{conversation_id}",
+            headers={"xi-api-key": api_key}, timeout=10,
+        )
+        d = r.json()
+    except Exception:
+        _log(logging.WARNING, "call_outcome_fetch_failed", exc=True, conversation_id=conversation_id)
+        return
+    md = d.get("metadata") or {}
+    an = d.get("analysis") or {}
+    row = {
+        "conversation_id": conversation_id,
+        "status": d.get("status"),
+        "call_successful": an.get("call_successful"),          # 'success' | 'failure' | 'unknown'
+        "transcript_summary": an.get("transcript_summary") or "",
+        "summary_title": an.get("call_summary_title") or "",
+        "duration_seconds": md.get("call_duration_secs"),
+        "termination_reason": md.get("termination_reason"),
+        "evaluation_results": an.get("evaluation_criteria_results") or {},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if call_sid:
+        row["call_sid"] = call_sid
+    if website_conversation_id:
+        row["website_conversation_id"] = website_conversation_id
+    if restaurant_name:
+        row["restaurant_name"] = restaurant_name
+    try:
+        supabase_admin.table("call_outcomes").upsert(row, on_conflict="conversation_id").execute()
+    except Exception:
+        _log(logging.WARNING, "call_outcome_persist_failed", exc=True, conversation_id=conversation_id)
+
+
 def make_restaurant_call_tool(parameters: dict) -> dict:
     # __conversation_id__ is the WEBSITE conversation (for analytics linking)
     website_conversation_id = parameters.pop("__conversation_id__", "")
@@ -417,14 +461,19 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
     # Block (under the 75s tool timeout) until the caller conversation finishes.
     # ElevenLabs owns the call now; we poll its conversation status, not Twilio's.
     deadline = time.time() + 55
+    _persist = lambda: _persist_call_outcome(
+        caller_conversation_id, call_sid=call_sid,
+        website_conversation_id=website_conversation_id, restaurant_name=restaurant_name)
     while time.time() < deadline:
         time.sleep(4)
         outcome = _conversation_outcome(caller_conversation_id)
         if outcome.get("call_status") == "done":
+            _persist()  # observability: persist the final outcome (best-effort)
             return {"success": True, "call_sid": call_sid,
                     "conversation_id": caller_conversation_id, **outcome}
 
-    # Still talking/processing — hand the agent the id so it can poll once more.
+    # Still talking/processing — persist what we have; check_call_status will refresh.
+    _persist()
     return {"success": True, "call_sid": call_sid,
             "conversation_id": caller_conversation_id, "call_status": "in_progress"}
 
@@ -437,6 +486,7 @@ def check_call_status_tool(parameters: dict) -> dict:
     outcome = _conversation_outcome(conversation_id)
     if not outcome:
         return {"success": False, "error": "conversation not found"}
+    _persist_call_outcome(conversation_id)  # refresh the outcome row (analysis now complete)
     return {"success": True, "conversation_id": conversation_id, **outcome}
 
 

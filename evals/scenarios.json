@@ -1,0 +1,79 @@
+[
+  {
+    "id": "pepeverde_tel_href",
+    "name": "PepeVerde — E.164 only in tel: href",
+    "fixture": "pepeverde.html",
+    "expected": {
+      "name": "PepeVerde",
+      "phone_number": "+390373123456",
+      "address": "Piazza Benvenuti 6, Ombriano di Crema",
+      "hours": "Mar-Dom 18:30-23:30"
+    }
+  },
+  {
+    "id": "trattoriadaroma_plain",
+    "name": "Trattoria da Roma — plain-text phone, no tel: link",
+    "fixture": "trattoriadaroma.html",
+    "expected": {
+      "name": "Trattoria da Roma",
+      "phone_number": "+390612345678",
+      "address": "Via Nazionale 12, Roma",
+      "hours": "12:00-15:00, 19:00-23:00"
+    }
+  },
+  {
+    "id": "osteriadelmare_href_list",
+    "name": "Osteria del Mare — tel: href + hours in a list",
+    "fixture": "osteriadelmare.html",
+    "expected": {
+      "name": "Osteria del Mare",
+      "phone_number": "+390815551234",
+      "address": "Via Caracciolo 5, Napoli",
+      "hours": "Mar-Dom, lunedì chiuso"
+    }
+  },
+  {
+    "id": "sushibarmilano_intl_text",
+    "name": "Sushi Bar Milano — +39 number in visible text",
+    "fixture": "sushibarmilano.html",
+    "expected": {
+      "name": "Sushi Bar Milano",
+      "phone_number": "+390298765432",
+      "address": "Corso Buenos Aires 20, Milano",
+      "hours": "12:00-14:30, 19:00-23:00"
+    }
+  },
+  {
+    "id": "caffecentrale_no_phone",
+    "name": "Caffè Centrale — no phone (must return null gracefully)",
+    "fixture": "caffecentrale.html",
+    "expected": {
+      "name": "Caffè Centrale",
+      "phone_number": null,
+      "address": "Piazza Duomo 1, Firenze",
+      "hours": "7:00-20:00"
+    }
+  },
+  {
+    "id": "belvedere_two_numbers",
+    "name": "Belvedere — must pick the booking line, not the fax",
+    "fixture": "belvedere_due_numeri.html",
+    "expected": {
+      "name": "Ristorante Belvedere",
+      "phone_number": "+390113334444",
+      "address": "Strada Panoramica 8, Torino",
+      "hours": "gio-lun 19:00-23:00"
+    }
+  },
+  {
+    "id": "locandasanmarco_sparse",
+    "name": "Locanda San Marco — sparse page, name only in title, no address/hours",
+    "fixture": "locandasanmarco_sparse.html",
+    "expected": {
+      "name": "Locanda San Marco",
+      "phone_number": "+390432998877",
+      "address": null,
+      "hours": null
+    }
+  }
+]
