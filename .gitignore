@@ -4,5 +4,8 @@ venv/
 __pycache__/
 *.pyc
 
+# Interview-prep companion — kept local, not shared in the public repo
+STUDY_GUIDE.md
+
 # Graphify
 graphify-out/
