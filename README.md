@@ -123,7 +123,7 @@ These are ElevenLabs platform settings on the agent, not something the backend i
 
 ## Database schema
 
-Four tables, created by [`migrations/`](migrations/):
+Created by [`migrations/`](migrations/):
 
 | Table | Key columns | RLS |
 |---|---|---|
@@ -131,8 +131,10 @@ Four tables, created by [`migrations/`](migrations/):
 | `sessions` | `id`, `user_id`, `started_at`, `ended_at`, `duration_seconds`, `amount_charged` (€ cents), `stripe_payment_intent_id`, `restaurant_name`, `elevenlabs_conversation_id` | SELECT own sessions |
 | `restaurants` | `id` (SERIAL), `name` (UNIQUE, case-insensitive index), `phone_number`, `address`, `call_count` | service-role only |
 | `tool_metrics` | `id`, `tool`, `duration_ms`, `outcome`, `call_sid`, `conversation_id`, `created_at` | service-role only |
+| `call_outcomes` | `conversation_id` (PK), `call_sid`, `status`, `call_successful`, `transcript_summary`, `duration_seconds`, `evaluation_results` (jsonb), `restaurant_name` | service-role only |
+| `eval_runs` / `eval_results` | offline `/scrape` eval: run rollup (`success_rate`, `avg_score`, `p50/p95_ms`) + per-scenario drill-down | service-role only |
 
-(`call_statuses` from migration 002 is now unused — it backed the old hand-rolled Twilio polling, which the native integration replaced. The table is left in place but no longer written.)
+(`call_statuses` from migration 002 is now unused — it backed the old hand-rolled Twilio polling, which the native integration replaced. Left in place but no longer written.)
 
 All backend access goes through a service-role Supabase client (bypasses RLS). A separate anon client is used only for `sign_in_with_password` — see [Security notes](#security-notes-worth-knowing-before-reading-the-code).
 
@@ -215,6 +217,29 @@ It's now a single structured-extraction call: the page is fetched (through an SS
 Stripe is configured in **test mode** (`pk_test_…` / `sk_test_…`, confirmed live on the deployed instance via `GET /config`). The full flow — card setup via Stripe Elements, a SetupIntent, a per-minute `PaymentIntent` on session end (`minutes × €0.15 + €0.20`) — runs exactly as it would in production. No real money ever moves; this is the standard way to demo a paid product safely.
 
 `/session/end` is **idempotent**: it bails early if the session already has an `ended_at`, and passes a Stripe idempotency key derived from the `session_id`, so a retry, a second tab, or a network retry can't double-charge. The amount is always computed server-side from stored timestamps, never trusted from the client.
+
+---
+
+## Evals & Observability
+
+The honest constraint shapes this entirely: **ElevenLabs owns the audio loop** (ASR → LLM → TTS, turn-taking), so per-turn STT/LLM/TTS latency and tokens are *not* ours to measure — and this project does **not** fake them. It measures what it actually owns.
+
+### Observability — what we own
+
+- **Backend round-trips** — every tool/webhook is wrapped in `_track` and persisted to `tool_metrics` (`tool, duration_ms, outcome, …`). The `/observability` dashboard view shows p50/p95 latency *per operation* (`scrape:fetch`, `scrape:extract`, `lookup_restaurant`, `make_restaurant_call`, …) and the tool success rate. (`tool:make_restaurant_call` legitimately shows ~55s — it blocks on the whole call by design.)
+- **Call outcomes** — each restaurant-caller conversation's result (previously ephemeral) is persisted to `call_outcomes` (`status`, `call_successful`, `transcript_summary`/`summary_title`, `duration_seconds`, `termination_reason`, `evaluation_results`), pulled from the ElevenLabs conversation API. Drives the call-success rate and average call duration.
+
+### Evals — two honest halves
+
+1. **Offline, deterministic — restaurant-info extraction.** `evals/run_evals.py` runs the **production** extraction path (`_visible_text` + `_tel_hrefs` + `_extract_restaurant_info`) over saved fixtures with known ground truth, scores each field (phone by significant-digit suffix, name/address normalized, hours by presence), and writes `eval_runs` / `eval_results`. Fixtures cover the cases that matter: E.164 only in a `tel:` href, plain-text number, hours-in-a-list, no phone (null), fax-vs-booking disambiguation, sparse page. Reproducible, offline, no live fetch.
+
+   ```bash
+   .venv/Scripts/python.exe -m evals.run_evals
+   ```
+
+2. **Online, platform-native — ElevenLabs evaluation criteria.** The restaurant-caller agent carries prompt-based success criteria (`spoke_italian_only`, `stated_request`, `confirmed_details`, `ended_politely`); ElevenLabs' analysis LLM scores them on **every real call**, and the results land in `call_outcomes.evaluation_results`. The `/evals` view charts the offline task-success trend and the online criteria pass rates side by side.
+
+This is the deliberate point: you measure a platform-native agent at the **edges you control** (backend round-trips, call outcomes, extraction accuracy) and via the **platform's own evaluation hooks** — not by inventing audio-pipeline metrics you don't own. A companion dashboard (`/dashboard/observability`, `/dashboard/evals`, separate repo) reads these tables.
 
 ---
 
