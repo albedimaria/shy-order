@@ -175,6 +175,12 @@ def _is_e164(phone: str) -> bool:
     return bool(_E164_RE.match(phone))
 
 
+def _compute_charge_cents(duration_seconds: int) -> int:
+    """Billing: €0.20 base + €0.15 per started minute (rounded up). Minimum 1 minute."""
+    minutes = math.ceil(max(1, duration_seconds) / 60)
+    return minutes * 15 + 20
+
+
 def _validate_twilio_sig(request: Request, params: dict) -> None:
     """Reject requests not signed by Twilio. No-op if auth token not configured."""
     if not _twilio_auth_token:
@@ -825,8 +831,7 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     started_at = datetime.fromisoformat(session_rec.data["started_at"].replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     duration_seconds = max(1, int((now - started_at).total_seconds()))
-    minutes = math.ceil(duration_seconds / 60)
-    amount_cents = minutes * 15 + 20
+    amount_cents = _compute_charge_cents(duration_seconds)
 
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()

@@ -1,0 +1,6 @@
+# Test/dev dependencies only — NOT installed on the Render deploy.
+#   .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+#   .venv/Scripts/python.exe -m pytest -q
+-r requirements.txt
+pytest<9
+httpx<1
