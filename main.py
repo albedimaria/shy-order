@@ -2,6 +2,7 @@ import argparse
 import hmac
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -35,6 +36,45 @@ load_dotenv()
 AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
 
 _E164_RE = re.compile(r"^\+\d{7,15}$")
+
+# ---------------------------------------------------------------------------
+# Structured logging
+# ---------------------------------------------------------------------------
+# One JSON line per event so Render's log drain stays grep-/jq-friendly. The
+# point is to stop swallowing failures silently: every caught-and-ignored
+# exception below now emits a WARNING with enough context (tool, call_sid,
+# session_id) to debug a production voice call after the fact.
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "event": record.getMessage(),
+        }
+        payload.update(getattr(record, "extra_fields", {}))
+        if record.exc_info:
+            payload["error"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def _setup_logging() -> logging.Logger:
+    logger = logging.getLogger("shyorder")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(_JsonFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+        logger.propagate = False
+    return logger
+
+
+log = _setup_logging()
+
+
+def _log(level: int, event: str, exc: bool = False, **fields) -> None:
+    """Emit one structured log line; `fields` become top-level JSON keys."""
+    log.log(level, event, exc_info=exc, extra={"extra_fields": fields})
 
 # ---------------------------------------------------------------------------
 # External clients
@@ -200,7 +240,7 @@ def _get_call_status(call_sid: str) -> str | None:
                 return result.data[0]["status"]
             return None
         except Exception:
-            pass
+            _log(logging.WARNING, "call_status_read_failed", exc=True, call_sid=call_sid)
     return _call_statuses_mem.get(call_sid)
 
 
@@ -214,7 +254,7 @@ def _set_call_status(call_sid: str, status: str) -> None:
             }).execute()
             return
         except Exception:
-            pass
+            _log(logging.WARNING, "call_status_write_failed", exc=True, call_sid=call_sid, status=status)
     _call_statuses_mem[call_sid] = status
 
 # ---------------------------------------------------------------------------
@@ -260,7 +300,7 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
                 "address": r.get("address", ""),
             }
     except Exception:
-        pass
+        _log(logging.WARNING, "restaurant_lookup_failed", exc=True, name=name_query)
     return {"found": False}
 
 
@@ -316,7 +356,7 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
                 "increment_restaurant_call_count", {"p_name": restaurant_name}
             ).execute()
         except Exception:
-            pass
+            _log(logging.WARNING, "restaurant_call_count_increment_failed", exc=True, restaurant_name=restaurant_name)
         # Link restaurant to the current session (if conversation_id was supplied)
         if conversation_id:
             try:
@@ -324,7 +364,8 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
                     {"restaurant_name": restaurant_name}
                 ).eq("elevenlabs_conversation_id", conversation_id).execute()
             except Exception:
-                pass
+                _log(logging.WARNING, "session_restaurant_link_failed", exc=True,
+                     conversation_id=conversation_id, restaurant_name=restaurant_name)
 
     terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
     deadline = time.time() + 60
@@ -461,6 +502,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    """One structured access-log line per request, with server-side latency.
+
+    This is the latency we own end to end (request in → response out). Note that
+    /tools/make_restaurant_call will legitimately show ~60s here: that's the
+    backend blocking on the phone call, by design (see make_restaurant_call_tool).
+    """
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start) * 1000, 1)
+    _log(
+        logging.INFO, "http_request",
+        method=request.method, path=request.url.path,
+        status=response.status_code, duration_ms=duration_ms,
+    )
+    return response
+
 # ---------------------------------------------------------------------------
 # Static files
 # ---------------------------------------------------------------------------
@@ -557,7 +617,7 @@ def auth_login(req: LoginRequest) -> JSONResponse:
             pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
             has_payment_method = len(pms.data) > 0
     except Exception:
-        pass
+        _log(logging.WARNING, "login_payment_lookup_failed", exc=True, user_id=str(user.id))
 
     return JSONResponse({
         "access_token": resp.session.access_token,
@@ -607,6 +667,7 @@ def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
         pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
         return JSONResponse({"has_payment_method": len(pms.data) > 0})
     except Exception:
+        _log(logging.WARNING, "google_pm_lookup_failed", exc=True, user_id=str(user.id))
         return JSONResponse({"has_payment_method": False})
 
 # ---------------------------------------------------------------------------
@@ -692,7 +753,7 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     try:
         session_rec = (
             supabase_admin.table("sessions")
-            .select("started_at")
+            .select("started_at, ended_at, duration_seconds, amount_charged")
             .eq("id", req.session_id)
             .eq("user_id", str(user.id))
             .single()
@@ -700,6 +761,16 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
         )
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Idempotency guard: if this session was already closed, return what it was
+    # charged instead of charging again. The frontend already guards against a
+    # double-fire, but a retry / second tab / network retry must not double-bill.
+    if session_rec.data.get("ended_at"):
+        return JSONResponse({
+            "amount_charged": session_rec.data.get("amount_charged") or 0,
+            "duration_seconds": session_rec.data.get("duration_seconds") or 0,
+            "already_ended": True,
+        })
 
     started_at = datetime.fromisoformat(session_rec.data["started_at"].replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
@@ -727,6 +798,9 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
             payment_method=pm_id,
             confirm=True,
             off_session=True,
+            # Stripe dedupes by this key, so a retried/concurrent /session/end for
+            # the same session reuses the original PaymentIntent instead of charging twice.
+            idempotency_key=f"session-end-{req.session_id}",
         )
         pi_id = payment_intent.id
     except _stripe.error.CardError as e:
@@ -734,12 +808,18 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    supabase_admin.table("sessions").update({
-        "ended_at": now.isoformat(),
-        "duration_seconds": duration_seconds,
-        "amount_charged": amount_cents,
-        "stripe_payment_intent_id": pi_id,
-    }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+    try:
+        supabase_admin.table("sessions").update({
+            "ended_at": now.isoformat(),
+            "duration_seconds": duration_seconds,
+            "amount_charged": amount_cents,
+            "stripe_payment_intent_id": pi_id,
+        }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+    except Exception:
+        # The charge already went through — if we can't record it, log loudly so
+        # the orphaned charge is recoverable (the idempotency key prevents a re-charge).
+        _log(logging.ERROR, "session_end_update_failed_after_charge", exc=True,
+             session_id=req.session_id, payment_intent_id=pi_id, amount_charged=amount_cents)
 
     return JSONResponse({"amount_charged": amount_cents, "duration_seconds": duration_seconds})
 
@@ -826,10 +906,15 @@ async def twilio_incoming(request: Request) -> Response:
             token = resp.json().get("token")
             if token:
                 ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
+        else:
+            _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
     except Exception:
-        pass
+        _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
 
     if not ws_url:
+        # The call is already ringing; without a token we can only apologise and
+        # hang up. This path used to be silent — now it's logged loudly above.
+        _log(logging.ERROR, "twilio_incoming_no_ws_url", restaurant_name=restaurant_name)
         error_twiml = VoiceResponse()
         error_twiml.say("Si è verificato un errore tecnico. Riprova più tardi.", language="it-IT")
         error_twiml.hangup()
@@ -901,7 +986,15 @@ def tools_webhook(request: Request, payload: dict) -> JSONResponse:
 @app.post("/tools/{tool_name}")
 def tools_by_path(tool_name: str, request: Request, payload: dict | None = None) -> JSONResponse:
     _check_tools_auth(request)
-    parameters = (payload or {}).get("parameters", payload or {})
+    payload = payload or {}
+    # ElevenLabs path-based tools POST the params at the top level (no "parameters"
+    # wrapper), so fall back to the whole body. Inject __conversation_id__ the same
+    # way the body-based /tools handler does — without this, make_restaurant_call
+    # never receives it and sessions.restaurant_name is never linked.
+    parameters = dict(payload.get("parameters", payload))
+    parameters["__conversation_id__"] = (
+        payload.get("conversation_id") or parameters.get("conversation_id") or ""
+    )
     return _run_tool(tool_name, parameters)
 
 # ---------------------------------------------------------------------------
