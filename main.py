@@ -33,7 +33,16 @@ from supabase import create_client as _create_supabase_client
 
 load_dotenv()
 
-AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
+AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"  # website assistant: talks to the user
+
+# Restaurant-caller agent: a separate ElevenLabs agent that places the actual
+# phone call to the restaurant (customer persona, forced Italian). The website
+# assistant collects the order, then the backend triggers this agent via
+# ElevenLabs' native Twilio outbound call — which bridges the audio correctly,
+# unlike the old hand-rolled <Connect><Stream> that never spoke the Twilio
+# Media Streams protocol. Booking details are passed as dynamic variables.
+CALLER_AGENT_ID       = os.getenv("CALLER_AGENT_ID", "agent_9401kvdgv4fxftxr951vgbh19dvy")
+AGENT_PHONE_NUMBER_ID = os.getenv("AGENT_PHONE_NUMBER_ID", "phnum_5501kvdgbrayfty8ptzwm7c5j72r")
 
 _E164_RE = re.compile(r"^\+\d{7,15}$")
 
@@ -377,9 +386,45 @@ def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
         return {"error": str(e)}
 
 
+_BOOKING_VAR_KEYS = (
+    "booking_type", "customer_name", "party_size", "date",
+    "time_primary", "time_fallback", "order_items", "pickup_time", "special_requests",
+)
+
+
+def _caller_dynamic_vars(parameters: dict, restaurant_name: str) -> dict:
+    """Build the dynamic variables the restaurant-caller agent reads from its prompt.
+    All keys are always present (empty string if not supplied) so the conversation
+    never fails on a missing variable; empty fields are simply not spoken."""
+    dyn = {"restaurant_name": restaurant_name}
+    for k in _BOOKING_VAR_KEYS:
+        v = parameters.get(k, "")
+        dyn[k] = str(v) if v is not None else ""
+    return dyn
+
+
+def _conversation_outcome(conversation_id: str) -> dict:
+    """Fetch the caller conversation's final analysis (status, success, summary)."""
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    try:
+        r = _requests.get(
+            f"https://api.elevenlabs.io/v1/convai/conversations/{conversation_id}",
+            headers={"xi-api-key": api_key}, timeout=10,
+        )
+        d = r.json()
+    except Exception:
+        return {}
+    analysis = d.get("analysis") or {}
+    return {
+        "call_status": d.get("status"),
+        "call_successful": analysis.get("call_successful"),
+        "summary": analysis.get("transcript_summary") or "",
+    }
+
+
 def make_restaurant_call_tool(parameters: dict) -> dict:
-    # __conversation_id__ is injected by the /tools webhook handler
-    conversation_id = parameters.pop("__conversation_id__", "")
+    # __conversation_id__ is the WEBSITE conversation (for analytics linking)
+    website_conversation_id = parameters.pop("__conversation_id__", "")
     phone_number    = parameters.get("phone_number", "").strip()
     restaurant_name = parameters.get("restaurant_name", "").strip()
 
@@ -387,67 +432,77 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         return {"success": False, "error": "phone_number is required"}
     if not _is_e164(phone_number):
         return {"success": False, "error": "phone_number must be E.164 format (e.g. +390612345678)"}
-    if not _twilio_client:
-        return {"success": False, "error": "Twilio not configured"}
-    if not _twilio_phone_number:
-        return {"success": False, "error": "TWILIO_PHONE_NUMBER not configured"}
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        return {"success": False, "error": "ELEVENLABS_API_KEY not configured"}
+    if not AGENT_PHONE_NUMBER_ID:
+        return {"success": False, "error": "AGENT_PHONE_NUMBER_ID not configured"}
 
-    # Trial mode: redirect all outbound calls to a fixed test number
-    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
+    # Test mode: redirect the call to a fixed number (you stand in for the restaurant).
+    to_number = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
 
-    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
-
+    payload = {
+        "agent_id": CALLER_AGENT_ID,
+        "agent_phone_number_id": AGENT_PHONE_NUMBER_ID,
+        "to_number": to_number,
+        "conversation_initiation_client_data": {
+            "dynamic_variables": _caller_dynamic_vars(parameters, restaurant_name),
+        },
+    }
     try:
-        call = _twilio_client.calls.create(
-            to=dial_to,
-            from_=_twilio_phone_number,
-            url=webhook_url,
-            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
-            status_callback_method="POST",
+        resp = _requests.post(
+            "https://api.elevenlabs.io/v1/convai/twilio/outbound-call",
+            json=payload, headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            timeout=15,
         )
+        data = resp.json()
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"outbound-call error: {e}"}
+    if not resp.ok or not data.get("success"):
+        return {"success": False, "error": data.get("message") or f"outbound-call HTTP {resp.status_code}"}
 
-    call_sid = call.sid
-    _set_call_status(call_sid, call.status)
+    caller_conversation_id = data.get("conversation_id", "")
+    call_sid = data.get("callSid", "")
 
-    # Track restaurant analytics
+    # Analytics: bump the restaurant's call count and link it to the website session.
     if supabase_admin and restaurant_name:
         try:
-            supabase_admin.rpc(
-                "increment_restaurant_call_count", {"p_name": restaurant_name}
-            ).execute()
+            supabase_admin.rpc("increment_restaurant_call_count", {"p_name": restaurant_name}).execute()
         except Exception:
             _log(logging.WARNING, "restaurant_call_count_increment_failed", exc=True, restaurant_name=restaurant_name)
-        # Link restaurant to the current session (if conversation_id was supplied)
-        if conversation_id:
+        if website_conversation_id:
             try:
                 supabase_admin.table("sessions").update(
                     {"restaurant_name": restaurant_name}
-                ).eq("elevenlabs_conversation_id", conversation_id).execute()
+                ).eq("elevenlabs_conversation_id", website_conversation_id).execute()
             except Exception:
                 _log(logging.WARNING, "session_restaurant_link_failed", exc=True,
-                     conversation_id=conversation_id, restaurant_name=restaurant_name)
+                     conversation_id=website_conversation_id, restaurant_name=restaurant_name)
 
-    terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
-    deadline = time.time() + 60
+    # Block (under the 75s tool timeout) until the caller conversation finishes.
+    # ElevenLabs owns the call now; we poll its conversation status, not Twilio's.
+    deadline = time.time() + 55
     while time.time() < deadline:
-        time.sleep(3)
-        status = _get_call_status(call_sid) or ""
-        if status in terminal:
-            return {"success": True, "call_sid": call_sid, "status": status}
+        time.sleep(4)
+        outcome = _conversation_outcome(caller_conversation_id)
+        if outcome.get("call_status") == "done":
+            return {"success": True, "call_sid": call_sid,
+                    "conversation_id": caller_conversation_id, **outcome}
 
-    return {"success": True, "call_sid": call_sid, "status": _get_call_status(call_sid) or "timeout"}
+    # Still talking/processing — hand the agent the id so it can poll once more.
+    return {"success": True, "call_sid": call_sid,
+            "conversation_id": caller_conversation_id, "call_status": "in_progress"}
 
 
 def check_call_status_tool(parameters: dict) -> dict:
-    call_sid = parameters.get("call_sid", "").strip()
-    if not call_sid:
-        return {"success": False, "error": "call_sid is required"}
-    status = _get_call_status(call_sid)
-    if status is None:
-        return {"success": False, "error": "call_sid not found"}
-    return {"success": True, "call_sid": call_sid, "status": status}
+    # New flow: the call lives as an ElevenLabs caller conversation.
+    conversation_id = (parameters.get("conversation_id") or parameters.get("call_sid") or "").strip()
+    if not conversation_id:
+        return {"success": False, "error": "conversation_id is required"}
+    outcome = _conversation_outcome(conversation_id)
+    if not outcome:
+        return {"success": False, "error": "conversation not found"}
+    return {"success": True, "conversation_id": conversation_id, **outcome}
 
 
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
