@@ -220,11 +220,12 @@ def test_tools_auth_accepts_correct_secret(monkeypatch):
     assert r.json() == {"found": False}
 
 
-def test_twilio_status_parses_form(monkeypatch):
-    """Regression: /twilio/status does `await request.form()`, which 500s without
-    python-multipart installed. This guards that the dependency stays present."""
-    monkeypatch.setattr(main, "_twilio_auth_token", "")  # bypass signature check
-    monkeypatch.setattr(main, "supabase_admin", None)    # _set_call_status → in-memory, no network
-    r = client.post("/twilio/status", data={"CallSid": "CAregress", "CallStatus": "completed"})
-    assert r.status_code == 200
-    assert main._get_call_status("CAregress") == "completed"
+def test_caller_dynamic_vars_always_complete():
+    """The restaurant-caller agent's prompt references these dynamic variables;
+    all must always be present (empty string if unset) or the conversation fails."""
+    dyn = main._caller_dynamic_vars({"booking_type": "prenotazione", "party_size": 2}, "PepeVerde")
+    assert dyn["restaurant_name"] == "PepeVerde"
+    assert dyn["booking_type"] == "prenotazione"
+    assert dyn["party_size"] == "2"          # coerced to string
+    assert dyn["order_items"] == ""          # unset → empty, never missing
+    assert set(main._BOOKING_VAR_KEYS).issubset(dyn)

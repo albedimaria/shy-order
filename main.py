@@ -10,15 +10,12 @@ import socket
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests as _requests
 import stripe as _stripe
 import uvicorn
 from openai import OpenAI
-from twilio.request_validator import RequestValidator as TwilioRequestValidator
-from twilio.rest import Client as TwilioClient
-from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
@@ -33,7 +30,16 @@ from supabase import create_client as _create_supabase_client
 
 load_dotenv()
 
-AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"
+AGENT_ID = "agent_9901kjyr4vwpeyyr2rc3e37qkncs"  # website assistant: talks to the user
+
+# Restaurant-caller agent: a separate ElevenLabs agent that places the actual
+# phone call to the restaurant (customer persona, forced Italian). The website
+# assistant collects the order, then the backend triggers this agent via
+# ElevenLabs' native Twilio outbound call — which bridges the audio correctly,
+# unlike the old hand-rolled <Connect><Stream> that never spoke the Twilio
+# Media Streams protocol. Booking details are passed as dynamic variables.
+CALLER_AGENT_ID       = os.getenv("CALLER_AGENT_ID", "agent_9401kvdgv4fxftxr951vgbh19dvy")
+AGENT_PHONE_NUMBER_ID = os.getenv("AGENT_PHONE_NUMBER_ID", "phnum_5501kvdgbrayfty8ptzwm7c5j72r")
 
 _E164_RE = re.compile(r"^\+\d{7,15}$")
 
@@ -107,31 +113,17 @@ _openai_api_key = os.getenv("OPENAI_API_KEY", "")
 _openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
 _OPENAI_MODEL = "gpt-4.1-mini"
 
-_twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
-_twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN", "")
-_twilio_phone_number = os.getenv("TWILIO_PHONE_NUMBER", "")
-_twilio_client = (
-    TwilioClient(_twilio_account_sid, _twilio_auth_token)
-    if _twilio_account_sid and _twilio_auth_token
-    else None
-)
-
-# Public base URL Twilio reaches us at (used to build webhook URLs and to
-# reconstruct the URL for Twilio signature validation). Deployment moved from
-# Railway to Render; PUBLIC_BASE_URL is the current name, RAILWAY_PUBLIC_URL is
-# still honored for back-compat with any existing env config.
+# Public base URL of this app. Twilio is handled entirely by ElevenLabs' native
+# integration now, so this is only used for CORS / the OAuth redirect origin.
 _PUBLIC_BASE_URL      = os.getenv("PUBLIC_BASE_URL") or os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
 # Where Google OAuth returns the user. The voice frontend is served both by this
 # app (at /) and at the Vercel URL below; the redirect lands on the Vercel copy,
 # which talks to the same backend. Override with FRONTEND_URL if needed.
 _FRONTEND_URL         = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
 _TOOLS_WEBHOOK_SECRET = os.getenv("TOOLS_WEBHOOK_SECRET", "")
-# Override all outbound calls to a fixed number (e.g. for Twilio trial testing).
-# Set to "" or unset in production to call the real restaurant number.
+# Test mode: redirect the outbound restaurant call to a fixed number (you stand
+# in for the restaurant). Unset in production to call the real restaurant number.
 _TWILIO_OVERRIDE_TO   = os.getenv("TWILIO_OVERRIDE_TO", "")
-
-# In-memory fallback for call statuses (single-worker only; Supabase is preferred)
-_call_statuses_mem: dict[str, str] = {}
 
 _http_bearer = HTTPBearer()
 
@@ -170,10 +162,6 @@ class SessionLinkRequest(BaseModel):
     session_id: str
     conversation_id: str
 
-class TwilioCallRequest(BaseModel):
-    to: str
-    restaurant_name: str
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -186,21 +174,6 @@ def _compute_charge_cents(duration_seconds: int) -> int:
     """Billing: €0.20 base + €0.15 per started minute (rounded up). Minimum 1 minute."""
     minutes = math.ceil(max(1, duration_seconds) / 60)
     return minutes * 15 + 20
-
-
-def _validate_twilio_sig(request: Request, params: dict) -> None:
-    """Reject requests not signed by Twilio. No-op if auth token not configured."""
-    if not _twilio_auth_token:
-        return
-    path = request.url.path
-    query = str(request.url.query)
-    url = f"{_PUBLIC_BASE_URL}{path}"
-    if query:
-        url += f"?{query}"
-    validator = TwilioRequestValidator(_twilio_auth_token)
-    signature = request.headers.get("X-Twilio-Signature", "")
-    if not validator.validate(url, params, signature):
-        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 
 def _check_tools_auth(request: Request) -> None:
@@ -291,35 +264,6 @@ class _track:
         return False
 
 # ---------------------------------------------------------------------------
-# Call status store — Supabase-backed, in-memory fallback for local dev
-# ---------------------------------------------------------------------------
-
-def _get_call_status(call_sid: str) -> str | None:
-    if supabase_admin:
-        try:
-            result = supabase_admin.table("call_statuses").select("status").eq("call_sid", call_sid).execute()
-            if result.data:
-                return result.data[0]["status"]
-            return None
-        except Exception:
-            _log(logging.WARNING, "call_status_read_failed", exc=True, call_sid=call_sid)
-    return _call_statuses_mem.get(call_sid)
-
-
-def _set_call_status(call_sid: str, status: str) -> None:
-    if supabase_admin:
-        try:
-            supabase_admin.table("call_statuses").upsert({
-                "call_sid": call_sid,
-                "status": status,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-            return
-        except Exception:
-            _log(logging.WARNING, "call_status_write_failed", exc=True, call_sid=call_sid, status=status)
-    _call_statuses_mem[call_sid] = status
-
-# ---------------------------------------------------------------------------
 # Restaurant DB helpers — Supabase-backed (replaces restaurants.json)
 # ---------------------------------------------------------------------------
 
@@ -377,9 +321,45 @@ def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
         return {"error": str(e)}
 
 
+_BOOKING_VAR_KEYS = (
+    "booking_type", "customer_name", "party_size", "date",
+    "time_primary", "time_fallback", "order_items", "pickup_time", "special_requests",
+)
+
+
+def _caller_dynamic_vars(parameters: dict, restaurant_name: str) -> dict:
+    """Build the dynamic variables the restaurant-caller agent reads from its prompt.
+    All keys are always present (empty string if not supplied) so the conversation
+    never fails on a missing variable; empty fields are simply not spoken."""
+    dyn = {"restaurant_name": restaurant_name}
+    for k in _BOOKING_VAR_KEYS:
+        v = parameters.get(k, "")
+        dyn[k] = str(v) if v is not None else ""
+    return dyn
+
+
+def _conversation_outcome(conversation_id: str) -> dict:
+    """Fetch the caller conversation's final analysis (status, success, summary)."""
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    try:
+        r = _requests.get(
+            f"https://api.elevenlabs.io/v1/convai/conversations/{conversation_id}",
+            headers={"xi-api-key": api_key}, timeout=10,
+        )
+        d = r.json()
+    except Exception:
+        return {}
+    analysis = d.get("analysis") or {}
+    return {
+        "call_status": d.get("status"),
+        "call_successful": analysis.get("call_successful"),
+        "summary": analysis.get("transcript_summary") or "",
+    }
+
+
 def make_restaurant_call_tool(parameters: dict) -> dict:
-    # __conversation_id__ is injected by the /tools webhook handler
-    conversation_id = parameters.pop("__conversation_id__", "")
+    # __conversation_id__ is the WEBSITE conversation (for analytics linking)
+    website_conversation_id = parameters.pop("__conversation_id__", "")
     phone_number    = parameters.get("phone_number", "").strip()
     restaurant_name = parameters.get("restaurant_name", "").strip()
 
@@ -387,67 +367,77 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         return {"success": False, "error": "phone_number is required"}
     if not _is_e164(phone_number):
         return {"success": False, "error": "phone_number must be E.164 format (e.g. +390612345678)"}
-    if not _twilio_client:
-        return {"success": False, "error": "Twilio not configured"}
-    if not _twilio_phone_number:
-        return {"success": False, "error": "TWILIO_PHONE_NUMBER not configured"}
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        return {"success": False, "error": "ELEVENLABS_API_KEY not configured"}
+    if not AGENT_PHONE_NUMBER_ID:
+        return {"success": False, "error": "AGENT_PHONE_NUMBER_ID not configured"}
 
-    # Trial mode: redirect all outbound calls to a fixed test number
-    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
+    # Test mode: redirect the call to a fixed number (you stand in for the restaurant).
+    to_number = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
 
-    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(restaurant_name)}"
-
+    payload = {
+        "agent_id": CALLER_AGENT_ID,
+        "agent_phone_number_id": AGENT_PHONE_NUMBER_ID,
+        "to_number": to_number,
+        "conversation_initiation_client_data": {
+            "dynamic_variables": _caller_dynamic_vars(parameters, restaurant_name),
+        },
+    }
     try:
-        call = _twilio_client.calls.create(
-            to=dial_to,
-            from_=_twilio_phone_number,
-            url=webhook_url,
-            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
-            status_callback_method="POST",
+        resp = _requests.post(
+            "https://api.elevenlabs.io/v1/convai/twilio/outbound-call",
+            json=payload, headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            timeout=15,
         )
+        data = resp.json()
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"outbound-call error: {e}"}
+    if not resp.ok or not data.get("success"):
+        return {"success": False, "error": data.get("message") or f"outbound-call HTTP {resp.status_code}"}
 
-    call_sid = call.sid
-    _set_call_status(call_sid, call.status)
+    caller_conversation_id = data.get("conversation_id", "")
+    call_sid = data.get("callSid", "")
 
-    # Track restaurant analytics
+    # Analytics: bump the restaurant's call count and link it to the website session.
     if supabase_admin and restaurant_name:
         try:
-            supabase_admin.rpc(
-                "increment_restaurant_call_count", {"p_name": restaurant_name}
-            ).execute()
+            supabase_admin.rpc("increment_restaurant_call_count", {"p_name": restaurant_name}).execute()
         except Exception:
             _log(logging.WARNING, "restaurant_call_count_increment_failed", exc=True, restaurant_name=restaurant_name)
-        # Link restaurant to the current session (if conversation_id was supplied)
-        if conversation_id:
+        if website_conversation_id:
             try:
                 supabase_admin.table("sessions").update(
                     {"restaurant_name": restaurant_name}
-                ).eq("elevenlabs_conversation_id", conversation_id).execute()
+                ).eq("elevenlabs_conversation_id", website_conversation_id).execute()
             except Exception:
                 _log(logging.WARNING, "session_restaurant_link_failed", exc=True,
-                     conversation_id=conversation_id, restaurant_name=restaurant_name)
+                     conversation_id=website_conversation_id, restaurant_name=restaurant_name)
 
-    terminal = {"completed", "no-answer", "busy", "failed", "canceled"}
-    deadline = time.time() + 60
+    # Block (under the 75s tool timeout) until the caller conversation finishes.
+    # ElevenLabs owns the call now; we poll its conversation status, not Twilio's.
+    deadline = time.time() + 55
     while time.time() < deadline:
-        time.sleep(3)
-        status = _get_call_status(call_sid) or ""
-        if status in terminal:
-            return {"success": True, "call_sid": call_sid, "status": status}
+        time.sleep(4)
+        outcome = _conversation_outcome(caller_conversation_id)
+        if outcome.get("call_status") == "done":
+            return {"success": True, "call_sid": call_sid,
+                    "conversation_id": caller_conversation_id, **outcome}
 
-    return {"success": True, "call_sid": call_sid, "status": _get_call_status(call_sid) or "timeout"}
+    # Still talking/processing — hand the agent the id so it can poll once more.
+    return {"success": True, "call_sid": call_sid,
+            "conversation_id": caller_conversation_id, "call_status": "in_progress"}
 
 
 def check_call_status_tool(parameters: dict) -> dict:
-    call_sid = parameters.get("call_sid", "").strip()
-    if not call_sid:
-        return {"success": False, "error": "call_sid is required"}
-    status = _get_call_status(call_sid)
-    if status is None:
-        return {"success": False, "error": "call_sid not found"}
-    return {"success": True, "call_sid": call_sid, "status": status}
+    # New flow: the call lives as an ElevenLabs caller conversation.
+    conversation_id = (parameters.get("conversation_id") or parameters.get("call_sid") or "").strip()
+    if not conversation_id:
+        return {"success": False, "error": "conversation_id is required"}
+    outcome = _conversation_outcome(conversation_id)
+    if not outcome:
+        return {"success": False, "error": "conversation not found"}
+    return {"success": True, "conversation_id": conversation_id, **outcome}
 
 
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
@@ -896,102 +886,6 @@ def session_link(req: SessionLinkRequest, user=Depends(_get_user)) -> JSONRespon
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return JSONResponse({"ok": True})
-
-# ---------------------------------------------------------------------------
-# Twilio endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/twilio/call")
-def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse:
-    if not _twilio_client:
-        raise HTTPException(status_code=503, detail="Twilio not configured")
-    if not _twilio_phone_number:
-        raise HTTPException(status_code=503, detail="TWILIO_PHONE_NUMBER not configured")
-    if not _is_e164(req.to):
-        raise HTTPException(status_code=422, detail="'to' must be E.164 format (e.g. +390612345678)")
-
-    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
-    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else req.to
-
-    try:
-        call = _twilio_client.calls.create(
-            to=dial_to,
-            from_=_twilio_phone_number,
-            url=webhook_url,
-            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
-            status_callback_method="POST",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Twilio error: {e}")
-
-    _set_call_status(call.sid, call.status)
-    return JSONResponse({"call_sid": call.sid})
-
-
-@app.post("/twilio/status")
-async def twilio_status(request: Request) -> Response:
-    form = await request.form()
-    _validate_twilio_sig(request, dict(form))
-    call_sid    = form.get("CallSid", "")
-    call_status = form.get("CallStatus", "")
-    if call_sid:
-        _set_call_status(call_sid, call_status)
-    return Response(status_code=200)
-
-
-@app.get("/twilio/call-status/{call_sid}")
-def twilio_call_status(call_sid: str, user=Depends(_get_user)) -> JSONResponse:
-    status = _get_call_status(call_sid)
-    if status is None:
-        raise HTTPException(status_code=404, detail="call_sid not found")
-    return JSONResponse({"call_sid": call_sid, "status": status})
-
-
-@app.post("/twilio/incoming")
-async def twilio_incoming(request: Request) -> Response:
-    form = await request.form()
-    _validate_twilio_sig(request, dict(form))
-
-    restaurant_name = request.query_params.get("restaurant_name", "")
-
-    # Fetch a short-lived signed token to avoid exposing the API key in TwiML
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    ws_url = None
-    with _track("elevenlabs_token:twilio") as t:
-        try:
-            resp = _requests.get(
-                "https://api.elevenlabs.io/v1/convai/conversation/token",
-                params={"agent_id": AGENT_ID},
-                headers={"xi-api-key": api_key},
-                timeout=5,
-            )
-            if resp.ok:
-                token = resp.json().get("token")
-                if token:
-                    ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
-            else:
-                t.outcome = f"http_{resp.status_code}"
-                _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
-        except Exception:
-            t.outcome = "error"
-            _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
-
-    if not ws_url:
-        # The call is already ringing; without a token we can only apologise and
-        # hang up. This path used to be silent — now it's logged loudly above.
-        _log(logging.ERROR, "twilio_incoming_no_ws_url", restaurant_name=restaurant_name)
-        error_twiml = VoiceResponse()
-        error_twiml.say("Si è verificato un errore tecnico. Riprova più tardi.", language="it-IT")
-        error_twiml.hangup()
-        return Response(content=str(error_twiml), media_type="text/xml")
-
-    response = VoiceResponse()
-    connect = Connect()
-    stream = Stream(url=ws_url)
-    connect.append(stream)
-    response.append(connect)
-
-    return Response(content=str(response), media_type="text/xml")
 
 # ---------------------------------------------------------------------------
 # Scrape endpoint

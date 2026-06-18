@@ -10,7 +10,7 @@ Live demo: **https://shy-order.onrender.com** (Stripe is in test mode — the pa
 
 ## How it works — in three lines
 
-One ElevenLabs agent handles both sides of the interaction. The browser session and the outbound phone call to the restaurant are two independent WebSocket connections to the **same `agent_id`**. When Twilio connects the call and asks "what should I say?", the backend fetches a fresh signed URL and streams the phone audio to the same agent — exactly like the browser does. The agent's prompt is what tells it to behave as a warm user-facing assistant in phase 1, and as a confident Italian-speaking caller in phase 2.
+Two ElevenLabs agents, one job each. A **website assistant** talks to the user in the browser and collects the order. When it's ready, it calls the `make_restaurant_call` tool, and the backend fires a **restaurant-caller agent** at the restaurant's number via ElevenLabs' native Twilio outbound integration — passing the booking details as dynamic variables. That second agent places the call in Italian, handles the back-and-forth, and the backend hands its outcome (a transcript summary) back to the website assistant to relay to the user. ElevenLabs bridges the phone media; the backend never touches audio.
 
 ---
 
@@ -63,33 +63,26 @@ That asymmetry drives most of the architecture below.
 ### 2. Restaurant call (triggered from inside the session)
 
 ```
- ElevenLabs Agent      FastAPI (main.py)          Twilio         Restaurant
- ────────────────      ─────────────────          ──────         ──────────
-
+ Website agent         FastAPI (main.py)              ElevenLabs            Restaurant
+ ─────────────         ─────────────────              ──────────            ──────────
  POST /tools/lookup_restaurant
-                       SELECT restaurants WHERE lower(name) = …
+                       SELECT restaurants WHERE lower(name)=…
                     ◀─ { found, phone_number, address }
 
- POST /tools/make_restaurant_call
-                       Twilio.calls.create(to, from) ──▶ dials phone number
-                       polling loop, ≤60s ◀── POST /twilio/status (signed)
-                                            ◀── call connected
+ POST /tools/make_restaurant_call (with booking details)
+                       POST /v1/convai/twilio/outbound-call ──▶ places call ──────▶ dials
+                         agent_id = RESTAURANT-CALLER agent              (ElevenLabs bridges
+                         dynamic_variables = booking details              the media itself)
+                    ◀─ { conversation_id, callSid }                    caller agent ⇄ restaurant
+                       poll conversation status (≤55s)                  (Italian, places the order)
+                    ◀─ { call_status, call_successful, summary }
+                       (if still going → call_status:"in_progress";
+                        the website agent polls once via check_call_status)
 
-                       POST /twilio/incoming ◀── "what TwiML should I return?"
-                       returns <Connect><Stream>
-                       pointing at the SAME agent_id, fresh signed URL
-                                                      WebSocket ────▶ Agent
-                                                      (same agent, now on
-                                                       the phone, in Italian)
-                                                                      │
-                                                      call ends ──────┘
-                       polling loop returns final status
-                    ◀─ { status: "completed" | "no-answer" | "busy" | … }
-
- agent reports booking outcome to the user
+ website agent relays the summary to the user
 ```
 
-The key invariant: **the backend owns the wait, not the agent.** `make_restaurant_call` blocks for up to 60 seconds polling the call status before it returns — the LLM sees a single tool call with a final answer, not a loop it has to manage itself. See [Why a phone call blocks an HTTP request](#why-a-phone-call-blocks-an-http-request-for-up-to-60-seconds) for the full justification.
+The key invariant: **the backend owns the wait, not the LLM.** `make_restaurant_call` returns a single result (the caller conversation's outcome summary), so the website agent never manages a polling loop. The audio bridging is ElevenLabs' native Twilio integration — not a hand-rolled media stream (see [Bugs found and fixed](#bugs-found-and-fixed)).
 
 ---
 
@@ -97,8 +90,9 @@ The key invariant: **the backend owns the wait, not the agent.** `make_restauran
 
 | Decision | Why |
 |---|---|
-| Same agent, two WebSocket channels | Avoids running two separate agents in sync; the prompt's two-phase structure handles persona switching. See [How it works](#how-it-works--in-three-lines). |
-| Backend blocks ≤60s instead of agent polling | Keeps multi-turn bookkeeping in Python, not the LLM. See [below](#why-a-phone-call-blocks-an-http-request-for-up-to-60-seconds). |
+| Two dedicated agents (assistant + caller) | One persona per agent beats one agent branching between "talk to user" and "call restaurant". The caller is forced-Italian, receives the order as dynamic variables, and is reusable/independently testable. |
+| ElevenLabs native Twilio (not a custom media bridge) | Twilio Media Streams and ElevenLabs' conversation WebSocket speak different protocols; bridging them by hand is what the old code got wrong. The native integration handles the media. See [Bugs found and fixed](#bugs-found-and-fixed). |
+| Backend owns the wait | `make_restaurant_call` returns one result with the call outcome; the website agent never runs a polling loop. |
 | LLM-based restaurant extraction (not regex) | Restaurant websites have wildly different layouts; a forced tool call generalises to any of them. See [Restaurant data](#restaurant-data-structured-extraction-not-regex). |
 | Two separate Supabase clients | `sign_in_with_password` on a service-role client silently downgrades its auth header for every concurrent request — a real bug class, not hypothetical. See [Security notes](#security-notes-worth-knowing-before-reading-the-code). |
 
@@ -108,21 +102,20 @@ The key invariant: **the backend owns the wait, not the agent.** `make_restauran
 
 ### Turn detection and barge-in
 
-ElevenLabs uses its `turn_v2` model for end-of-turn detection — there is no fixed silence threshold; it models natural speech patterns to decide when a speaker has finished. The agent is configured with:
+ElevenLabs uses its `turn_v2` model for end-of-turn detection — no fixed silence threshold; it models natural speech patterns to decide when a speaker has finished. The **restaurant-caller** agent (the one on the phone) is configured with:
 
 - **`patient` eagerness** — waits for a genuine pause before responding, so it won't cut off the restaurant staff mid-sentence.
-- **`speculative_turn: true`** — the agent starts generating its reply while the current speaker is still talking, reducing perceived latency without pre-empting them.
-- **`background_voice_detection: false`** — on the restaurant-call leg, kitchen noise and background chatter don't falsely trigger a new user turn; only the main voice (restaurant staff) is tracked.
-- **7-second `turn_timeout`** — if audio goes silent for 7 seconds, the agent takes its turn. This is a safety net for dropped audio, not the primary detection mechanism.
+- **`background_voice_detection: false`** — kitchen noise and background chatter on the line don't falsely trigger a new turn; only the main voice (the staff member) is tracked.
+
+These are ElevenLabs platform settings on the agent, not something the backend implements — see [Observability and latency](#observability-and-latency) for what the backend *does* own.
 
 ### Error handling
 
 | Call status | What happens |
 |---|---|
-| `completed` | `make_restaurant_call` returns immediately; agent reports what was agreed. |
-| `no-answer`, `busy`, `failed`, `canceled` | Same — agent tells the user the restaurant didn't answer and asks whether to retry. |
-| `timeout` (call still live after 60s) | Agent says "it's taking a little longer than usual", then calls `check_call_status` once with the returned `call_sid` to get the final outcome before reporting back. |
-| Tool HTTP error (5xx from backend) | ElevenLabs surfaces it as a tool error; the `##Guardrails` section of the system prompt catches it and keeps the agent from going off-script. |
+| `call_status: done` + `summary` | The caller conversation finished; `make_restaurant_call` returns its `transcript_summary` and `call_successful`. The website agent relays it to the user. |
+| `call_status: in_progress` | The call is still going (or ElevenLabs is still producing the analysis) past the ~55s window. The website agent tells the user it's taking a moment and calls `check_call_status` once with the returned `conversation_id`. |
+| Outbound-call API error / bad number | `make_restaurant_call` returns `{success: false, error}`; the website agent's `##Guardrails` keep it from going off-script. E.164 is validated before any call is placed. |
 
 ---
 
@@ -135,8 +128,9 @@ Four tables, created by [`migrations/`](migrations/):
 | `users` | `id` (UUID, FK → `auth.users`), `email`, `stripe_customer_id` | SELECT own row |
 | `sessions` | `id`, `user_id`, `started_at`, `ended_at`, `duration_seconds`, `amount_charged` (€ cents), `stripe_payment_intent_id`, `restaurant_name`, `elevenlabs_conversation_id` | SELECT own sessions |
 | `restaurants` | `id` (SERIAL), `name` (UNIQUE, case-insensitive index), `phone_number`, `address`, `call_count` | service-role only |
-| `call_statuses` | `call_sid` (PK), `status`, `updated_at` | service-role only |
 | `tool_metrics` | `id`, `tool`, `duration_ms`, `outcome`, `call_sid`, `conversation_id`, `created_at` | service-role only |
+
+(`call_statuses` from migration 002 is now unused — it backed the old hand-rolled Twilio polling, which the native integration replaced. The table is left in place but no longer written.)
 
 All backend access goes through a service-role Supabase client (bypasses RLS). A separate anon client is used only for `sign_in_with_password` — see [Security notes](#security-notes-worth-knowing-before-reading-the-code).
 
@@ -144,49 +138,38 @@ All backend access goes through a service-role Supabase client (bypasses RLS). A
 
 ## ElevenLabs integration
 
+### Two agents
+
+- **Website assistant** (`AGENT_ID`) — talks to the user in the browser, collects the order, calls `make_restaurant_call`, relays the outcome.
+- **Restaurant-caller** (`CALLER_AGENT_ID`) — a separate agent with a customer-calling persona, forced Italian, no tools. It receives the booking details as **dynamic variables** at conversation start and places the call. Created/maintained independently of the assistant.
+
 ### Tools webhook
 
-The agent calls the backend via four registered webhook tools, all `POST` to `/tools/{tool_name}`:
+The website assistant calls the backend via webhook tools, all `POST` to `/tools/{tool_name}`:
 
 | Tool | Timeout | What it does |
 |---|---|---|
 | `lookup_restaurant` | 20s | Case-insensitive lookup in the `restaurants` table before asking the user for a phone number |
 | `save_restaurant_to_local_db` | 20s | Upsert a new restaurant after a successful booking |
-| `make_restaurant_call` | **75s** | Place a Twilio call and block until it completes (≤60s); returns final status |
-| `check_call_status` | 25s | Fallback: look up the call by `call_sid` if `make_restaurant_call` timed out |
+| `make_restaurant_call` | **75s** | Triggers the native Twilio outbound call to the caller agent; blocks ≤55s then returns the conversation's outcome summary (or `in_progress`) |
+| `check_call_status` | 25s | Fallback: fetch the caller conversation's final summary by `conversation_id` |
 
-The 75s timeout on `make_restaurant_call` is intentional — it has to be longer than the backend's 60s polling window or ElevenLabs will cut the tool call before the backend answers.
+Authentication: every inbound `/tools` request is verified with `hmac.compare_digest` against `TOOLS_WEBHOOK_SECRET` (constant-time, set via env var). On the ElevenLabs side the secret is a workspace secret sent as the `x-tools-secret` header on each tool. **Caveat (honest):** if `TOOLS_WEBHOOK_SECRET` is unset the check fails *open* (`main.py:_check_tools_auth`) — convenient for local dev, but the protection is only real when the env var is set on the deploy. It is set in production.
 
-Authentication: every inbound `/tools` request is verified with `hmac.compare_digest` against `TOOLS_WEBHOOK_SECRET` (constant-time comparison, set via env var). On the ElevenLabs side the secret is stored as a workspace secret and sent as the `x-tools-secret` header on each tool. **Caveat (honest):** if `TOOLS_WEBHOOK_SECRET` is unset the check fails *open* (`main.py:_check_tools_auth`) — convenient for local dev, but it means the protection is only real when the env var is actually set on the deploy. It is set in production.
+### Two ways the agent reaches ElevenLabs audio
 
-### Signed URL flow
-
-`POST /session/start` calls the ElevenLabs API to get a short-lived signed URL, returns it to the browser, and the browser opens a WebSocket directly to ElevenLabs. The backend never touches the audio stream. The same pattern is replicated in `POST /twilio/incoming` to bridge the phone call: Twilio hits the endpoint, FastAPI fetches a new signed URL, and returns a TwiML `<Connect><Stream>` pointing at it.
+- **Browser (website assistant):** `POST /session/start` fetches a short-lived signed URL; the browser opens a WebSocket **directly** to ElevenLabs. The backend never touches the audio.
+- **Phone (restaurant-caller):** `make_restaurant_call` calls `POST /v1/convai/twilio/outbound-call`. ElevenLabs places the call through the **imported Twilio number** and bridges the media itself — there is no TwiML or media stream in this codebase. The Twilio account credentials live in ElevenLabs (Phone Numbers import), not in the backend.
 
 ---
 
-## Why a phone call blocks an HTTP request for up to 60 seconds
+## Why `make_restaurant_call` blocks the request
 
-This is the one piece of the design that looks wrong at first glance.
+`make_restaurant_call` ([`main.py`](main.py)) places the outbound call, then **polls the caller conversation's status for up to ~55s** before returning. If it reaches `done`, it returns the conversation's `transcript_summary` + `call_successful`; otherwise it returns `call_status: "in_progress"` and the website agent polls once more via `check_call_status`.
 
-`make_restaurant_call` (in [`main.py`](main.py)) does this:
+The alternative — return immediately and let the LLM poll in a loop until the call ends — pushes multi-turn bookkeeping into the system prompt, which is fragile. Blocking server-side means the *backend* owns the wait and the agent gets a single tool call with the outcome. The 55s window sits under the 75s ElevenLabs tool timeout; the `in_progress` + `check_call_status` path covers longer calls (and ElevenLabs' post-call processing delay, during which the summary isn't ready yet).
 
-```python
-call = _twilio_client.calls.create(...)
-deadline = time.time() + 60
-while time.time() < deadline:
-    time.sleep(3)
-    status = _get_call_status(call_sid)
-    if status in {"completed", "no-answer", "busy", "failed", "canceled"}:
-        return {"success": True, "call_sid": call_sid, "status": status}
-return {"success": True, "call_sid": call_sid, "status": "timeout"}
-```
-
-The alternative would be: return immediately with just a `call_sid`, and have the agent poll a separate `check_call_status` tool in a loop until the call ends. That's a valid pattern — but it means the LLM has to manage a polling loop itself, which is exactly the kind of multi-turn bookkeeping that's fragile to get right in a system prompt.
-
-Blocking server-side means the *backend* — not the LLM — owns the polling loop. The agent gets a single tool call that returns the actual outcome. The trade-off is that the webhook tool's timeout on the ElevenLabs side must be configured longer than the backend's blocking window (`check_call_status` still exists for the one edge case where 60 seconds wasn't enough).
-
-**Where this stops scaling (honest):** the `/tools/*` routes are sync handlers, so FastAPI runs each in a threadpool (default ~40 workers). A blocking restaurant call therefore holds one thread for up to 60s — fine for a demo and realistic call volumes, but ~40 concurrent in-flight calls would exhaust the pool, and on a single small Render instance the practical ceiling is lower. The "correct at scale" answer is the async pattern this design deliberately traded away (return the `call_sid` immediately, push the outcome back via the status webhook). For this product's scale, the simplicity of one blocking tool call is the right trade; past it, you'd switch.
+**Where this stops scaling (honest):** `/tools/*` are sync handlers, so FastAPI runs each in a threadpool (default ~40 workers). A blocking call holds one thread for up to ~55s — fine for a demo and realistic volumes, but ~40 concurrent in-flight calls would exhaust the pool, and on a single small Render instance the practical ceiling is lower. The "correct at scale" answer is fully async (return immediately, deliver the outcome via an ElevenLabs post-call webhook). For this product's scale, the blocking tool call is the right trade; past it, you'd switch.
 
 ---
 
@@ -198,16 +181,15 @@ One FastAPI app, no internal microservices. Routes group into:
 
 - **Auth** (`/auth/*`) — Supabase Auth for email/password and Google OAuth, plus a Stripe customer created per user on signup.
 - **Billing** (`/payment/*`, `/session/start`, `/session/end`) — pay-per-minute via Stripe, see below.
-- **Voice session** (`/session/*`) — issues short-lived ElevenLabs tokens, links a conversation back to a session row for analytics.
-- **Tools webhook** (`/tools`, `/tools/{tool_name}`) — the only HTTP surface the ElevenLabs agent itself calls. Protected by a shared secret checked with constant-time comparison.
-- **Twilio** (`/twilio/*`) — places the outbound call, serves the TwiML that bridges the call audio to the agent, and receives Twilio's signed status callbacks.
+- **Voice session** (`/session/*`) — issues the website assistant's short-lived signed URL, links a conversation back to a session row for analytics.
+- **Tools webhook** (`/tools`, `/tools/{tool_name}`) — the only HTTP surface the website assistant calls; one of those tools triggers the outbound restaurant call. Protected by a shared secret checked with constant-time comparison.
 - **Scrape** (`/scrape`) — restaurant info extraction (see below).
 
-There's no job queue and no background worker: the "background" work (waiting for a phone call to finish) happens inside the HTTP request, which is only viable because the wait has a hard ceiling (60s).
+There is **no Twilio code in the backend** anymore: ElevenLabs' native integration owns the telephony. No job queue or background worker either — the wait for the call to finish happens inside the `make_restaurant_call` request, viable because it has a hard ceiling (~55s).
 
 ### Observability and latency
 
-Every request gets one structured JSON log line (`method`, `path`, `status`, `duration_ms`); every previously-silent `except` now logs with context (`tool`, `call_sid`, `session_id`) so a failed production call is debuggable after the fact. On top of that, a small `_track` context manager records the latency we actually own — ElevenLabs owns the audio/ASR/TTS pipeline, so the measurable surface is the **backend round-trips**: each tool webhook (`tool:make_restaurant_call` etc., tagged with the Twilio terminal status as `outcome`), the scrape (`scrape:fetch` + `scrape:extract`), and the ElevenLabs token fetch. Each is logged and persisted to `tool_metrics` (one row per op, best-effort — a failed metric insert never breaks the request) for the dashboard to chart.
+Every request gets one structured JSON log line (`method`, `path`, `status`, `duration_ms`); every previously-silent `except` now logs with context (`tool`, `conversation_id`, `session_id`) so a failed production call is debuggable after the fact. A small `_track` context manager records the latency we actually own — ElevenLabs owns the audio/ASR/TTS/turn-taking, so the measurable surface is the **backend round-trips**: each tool webhook (`tool:make_restaurant_call` tagged with the call outcome), the scrape (`scrape:fetch` + `scrape:extract`), and the signed-URL fetch. Each is logged and persisted to `tool_metrics` (one row per op, best-effort — a failed metric insert never breaks the request) for the dashboard to chart.
 
 ### Restaurant data: structured extraction, not regex
 
@@ -219,7 +201,7 @@ It's now a single structured-extraction call: the page is fetched (through an SS
 
 ## Security notes worth knowing before reading the code
 
-- **Twilio webhooks** (`/twilio/status`, `/twilio/incoming`) verify the `X-Twilio-Signature` header against the exact callback URL — without this, anyone could POST a fake "call completed" status.
+- **`/tools` webhook auth**: every call from the website agent carries `x-tools-secret`, checked with `hmac.compare_digest` (constant-time). Telephony auth is no longer our concern — ElevenLabs owns the Twilio leg, so there are no inbound Twilio webhooks to forge.
 - **SSRF guard on `/scrape`**: the target URL's resolved IP is checked against private/loopback/link-local/reserved ranges (including cloud metadata endpoints like `169.254.169.254`) before every fetch, including on every redirect hop.
 - **Two separate Supabase clients**: a service-role client for all data access, and a dedicated anon client used *only* for `sign_in_with_password`. They're kept apart because calling `sign_in_with_password` on the service-role client silently downgrades its auth header for every concurrent request sharing it — a real bug class with Supabase's Python client, not a hypothetical.
 - **Billing amounts are computed server-side** from `started_at`/`ended_at` timestamps stored in Postgres, never trusted from the client.
@@ -234,28 +216,17 @@ Stripe is configured in **test mode** (`pk_test_…` / `sk_test_…`, confirmed 
 
 ---
 
-## Where ElevenLabs' Workflows feature could go next
+## Bugs found and fixed
 
-The system prompt currently does something Workflows is built to make explicit: it runs as **one prompt with two implicit phases** (collect from user → call the restaurant), and the model itself decides when it's done with phase 1. That's a judgment call buried in prose, not a deterministic transition.
+The big one — found by actually placing an end-to-end test call:
 
-[ElevenLabs Workflows](https://elevenlabs.io/docs/eleven-agents/customization/agent-workflows) (introduced 2026) model a conversation as an explicit graph: **Subagent nodes** (own prompt, tools, voice, even LLM), connected by **edges** with either an LLM-evaluated condition, a deterministic expression, or an unconditional transition. Mapped onto this project:
+- **The phone leg never bridged audio.** The old `/twilio/incoming` returned a TwiML `<Connect><Stream>` pointing at ElevenLabs' *browser-SDK* conversation WebSocket. But Twilio Media Streams and that WebSocket speak **different protocols**, so the agent received no intelligible audio — the call connected, sat silent, and dropped. (And even if audio had bridged, the phone conversation is separate from the browser one and was never handed the booking details.) Fixed by migrating to ElevenLabs' **native Twilio outbound** integration with a dedicated restaurant-caller agent (see [How it works](#how-it-works--in-three-lines)); the hand-rolled bridge was deleted.
+- **`python-multipart` was missing** from `requirements.txt`, so the old Twilio webhooks (`await request.form()`) returned HTTP 500 in production — the call would ring but nothing worked. (Moot now that those webhooks are gone, but it's why the old flow failed silently on Render.)
+- Earlier agent-config fixes: `check_call_status` was referenced in the prompt but never registered; its webhook pointed at the wrong method/path; `make_restaurant_call`'s tool timeout was shorter than the backend's wait.
 
-```
-[Start] → [Subagent: Collect details]  --(all required fields present)-->  [Subagent: Call restaurant]  → [End]
-              tools: lookup_restaurant                                          tools: make_restaurant_call
-              language: IT/EN/ES                                               language: forced Italian
-              tone: warm, reassuring                                            tone: confident, brisk
-```
+### On ElevenLabs Workflows
 
-The phase transition becomes a checkable condition instead of an instruction the model has to interpret correctly every time, and each subagent's prompt only has to describe one persona instead of two. This wasn't built into the live agent for this round — Workflows graphs are built in the dashboard's visual editor (the API doesn't expose node/edge creation yet).
-
-### Bugs found and fixed while reviewing the prompt
-
-- `check_call_status` was referenced in the system prompt but the tool was **never actually registered on the agent** — that whole branch of the prompt was dead instruction the model couldn't follow.
-- The registered `check_call_status` tool's own webhook config pointed at `GET /tools` (wrong method, wrong path) — it would have failed even if it had been wired up.
-- `make_restaurant_call`'s tool timeout was 20 seconds, while the backend can legitimately block for up to 60 seconds — the platform would have aborted the tool call before the backend ever answered.
-
-All three are fixed directly on the live agent (timeout raised to 75s, `check_call_status` corrected and registered, prompt rewritten to match what the backend actually returns).
+The two-agent split here is the "subagents" idea done by hand: one persona per agent, the backend orchestrating the handoff. [ElevenLabs Workflows](https://elevenlabs.io/docs/eleven-agents/customization/agent-workflows) would formalize that handoff as an explicit graph (a checkable transition between a *collect* subagent and a *call* subagent) instead of backend glue — a natural next step, built in the dashboard's visual editor.
 
 ---
 
@@ -269,7 +240,7 @@ cp .env.example .env     # fill in keys — Stripe test keys, not live
 uvicorn main:app --reload
 ```
 
-Or talk to the agent directly from the terminal, no browser/Twilio involved:
+Or talk to the website assistant directly from the terminal, no browser involved:
 
 ```bash
 python main.py --local
@@ -282,20 +253,21 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The suite is fully offline (no Supabase/Stripe/Twilio calls — those globals are monkeypatched to the no-I/O branch). It covers the high-risk pure logic: E.164 validation, the billing formula, the SSRF guard (private IP / cloud-metadata / non-http, with `getaddrinfo` mocked), `tel:`/visible-text extraction, the tool param-name handling, and the `/tools` auth 401/200 paths.
+The suite is fully offline (no Supabase/Stripe/ElevenLabs calls — those globals are monkeypatched to the no-I/O branch). It covers the high-risk pure logic: E.164 validation, the billing formula, the SSRF guard (private IP / cloud-metadata / non-http, with `getaddrinfo` mocked), `tel:`/visible-text extraction, the caller dynamic-variables builder, and the `/tools` auth 401/200 paths.
 
 ### Required environment variables
 
 See [`.env.example`](.env.example). Notably:
 
 - `OPENAI_API_KEY` — powers restaurant-info extraction in `/scrape`.
-- `TWILIO_OVERRIDE_TO` — redirects every outbound call to a fixed test number; unset only when actually calling real restaurants.
-- `TOOLS_WEBHOOK_SECRET` — shared secret the ElevenLabs agent sends on every `/tools` call; verified server-side with constant-time comparison.
+- `CALLER_AGENT_ID` / `AGENT_PHONE_NUMBER_ID` — the restaurant-caller agent and the Twilio number imported into ElevenLabs (sensible defaults in `main.py`).
+- `TWILIO_OVERRIDE_TO` — redirects the outbound restaurant call to a fixed test number (you stand in for the restaurant); unset to call real restaurants.
+- `TOOLS_WEBHOOK_SECRET` — shared secret the website agent sends on every `/tools` call; verified server-side with constant-time comparison.
 
 ---
 
 ## Stack
 
-Python · FastAPI · ElevenLabs Conversational AI · Twilio · Supabase (Postgres + Auth) · Stripe · OpenAI (restaurant-info extraction) · deployed on Render.
+Python · FastAPI · ElevenLabs Conversational AI (two agents + native Twilio outbound) · Supabase (Postgres + Auth) · Stripe · OpenAI (restaurant-info extraction) · deployed on Render.
 
 A companion analytics dashboard (Next.js, separate repo) reads the same Supabase project.
