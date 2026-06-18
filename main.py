@@ -10,15 +10,12 @@ import socket
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests as _requests
 import stripe as _stripe
 import uvicorn
 from openai import OpenAI
-from twilio.request_validator import RequestValidator as TwilioRequestValidator
-from twilio.rest import Client as TwilioClient
-from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
@@ -116,31 +113,17 @@ _openai_api_key = os.getenv("OPENAI_API_KEY", "")
 _openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
 _OPENAI_MODEL = "gpt-4.1-mini"
 
-_twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID", "")
-_twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN", "")
-_twilio_phone_number = os.getenv("TWILIO_PHONE_NUMBER", "")
-_twilio_client = (
-    TwilioClient(_twilio_account_sid, _twilio_auth_token)
-    if _twilio_account_sid and _twilio_auth_token
-    else None
-)
-
-# Public base URL Twilio reaches us at (used to build webhook URLs and to
-# reconstruct the URL for Twilio signature validation). Deployment moved from
-# Railway to Render; PUBLIC_BASE_URL is the current name, RAILWAY_PUBLIC_URL is
-# still honored for back-compat with any existing env config.
+# Public base URL of this app. Twilio is handled entirely by ElevenLabs' native
+# integration now, so this is only used for CORS / the OAuth redirect origin.
 _PUBLIC_BASE_URL      = os.getenv("PUBLIC_BASE_URL") or os.getenv("RAILWAY_PUBLIC_URL", "https://shy-order.onrender.com")
 # Where Google OAuth returns the user. The voice frontend is served both by this
 # app (at /) and at the Vercel URL below; the redirect lands on the Vercel copy,
 # which talks to the same backend. Override with FRONTEND_URL if needed.
 _FRONTEND_URL         = os.getenv("FRONTEND_URL", "https://shy-order.vercel.app")
 _TOOLS_WEBHOOK_SECRET = os.getenv("TOOLS_WEBHOOK_SECRET", "")
-# Override all outbound calls to a fixed number (e.g. for Twilio trial testing).
-# Set to "" or unset in production to call the real restaurant number.
+# Test mode: redirect the outbound restaurant call to a fixed number (you stand
+# in for the restaurant). Unset in production to call the real restaurant number.
 _TWILIO_OVERRIDE_TO   = os.getenv("TWILIO_OVERRIDE_TO", "")
-
-# In-memory fallback for call statuses (single-worker only; Supabase is preferred)
-_call_statuses_mem: dict[str, str] = {}
 
 _http_bearer = HTTPBearer()
 
@@ -179,10 +162,6 @@ class SessionLinkRequest(BaseModel):
     session_id: str
     conversation_id: str
 
-class TwilioCallRequest(BaseModel):
-    to: str
-    restaurant_name: str
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -195,21 +174,6 @@ def _compute_charge_cents(duration_seconds: int) -> int:
     """Billing: €0.20 base + €0.15 per started minute (rounded up). Minimum 1 minute."""
     minutes = math.ceil(max(1, duration_seconds) / 60)
     return minutes * 15 + 20
-
-
-def _validate_twilio_sig(request: Request, params: dict) -> None:
-    """Reject requests not signed by Twilio. No-op if auth token not configured."""
-    if not _twilio_auth_token:
-        return
-    path = request.url.path
-    query = str(request.url.query)
-    url = f"{_PUBLIC_BASE_URL}{path}"
-    if query:
-        url += f"?{query}"
-    validator = TwilioRequestValidator(_twilio_auth_token)
-    signature = request.headers.get("X-Twilio-Signature", "")
-    if not validator.validate(url, params, signature):
-        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 
 def _check_tools_auth(request: Request) -> None:
@@ -298,35 +262,6 @@ class _track:
              duration_ms=duration_ms, outcome=self.outcome, **self.ctx)
         _persist_metric(self.tool, duration_ms, self.outcome, self.ctx)
         return False
-
-# ---------------------------------------------------------------------------
-# Call status store — Supabase-backed, in-memory fallback for local dev
-# ---------------------------------------------------------------------------
-
-def _get_call_status(call_sid: str) -> str | None:
-    if supabase_admin:
-        try:
-            result = supabase_admin.table("call_statuses").select("status").eq("call_sid", call_sid).execute()
-            if result.data:
-                return result.data[0]["status"]
-            return None
-        except Exception:
-            _log(logging.WARNING, "call_status_read_failed", exc=True, call_sid=call_sid)
-    return _call_statuses_mem.get(call_sid)
-
-
-def _set_call_status(call_sid: str, status: str) -> None:
-    if supabase_admin:
-        try:
-            supabase_admin.table("call_statuses").upsert({
-                "call_sid": call_sid,
-                "status": status,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-            return
-        except Exception:
-            _log(logging.WARNING, "call_status_write_failed", exc=True, call_sid=call_sid, status=status)
-    _call_statuses_mem[call_sid] = status
 
 # ---------------------------------------------------------------------------
 # Restaurant DB helpers — Supabase-backed (replaces restaurants.json)
@@ -951,102 +886,6 @@ def session_link(req: SessionLinkRequest, user=Depends(_get_user)) -> JSONRespon
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return JSONResponse({"ok": True})
-
-# ---------------------------------------------------------------------------
-# Twilio endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/twilio/call")
-def twilio_call(req: TwilioCallRequest, user=Depends(_get_user)) -> JSONResponse:
-    if not _twilio_client:
-        raise HTTPException(status_code=503, detail="Twilio not configured")
-    if not _twilio_phone_number:
-        raise HTTPException(status_code=503, detail="TWILIO_PHONE_NUMBER not configured")
-    if not _is_e164(req.to):
-        raise HTTPException(status_code=422, detail="'to' must be E.164 format (e.g. +390612345678)")
-
-    webhook_url = f"{_PUBLIC_BASE_URL}/twilio/incoming?restaurant_name={quote(req.restaurant_name)}"
-    dial_to = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else req.to
-
-    try:
-        call = _twilio_client.calls.create(
-            to=dial_to,
-            from_=_twilio_phone_number,
-            url=webhook_url,
-            status_callback=f"{_PUBLIC_BASE_URL}/twilio/status",
-            status_callback_method="POST",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Twilio error: {e}")
-
-    _set_call_status(call.sid, call.status)
-    return JSONResponse({"call_sid": call.sid})
-
-
-@app.post("/twilio/status")
-async def twilio_status(request: Request) -> Response:
-    form = await request.form()
-    _validate_twilio_sig(request, dict(form))
-    call_sid    = form.get("CallSid", "")
-    call_status = form.get("CallStatus", "")
-    if call_sid:
-        _set_call_status(call_sid, call_status)
-    return Response(status_code=200)
-
-
-@app.get("/twilio/call-status/{call_sid}")
-def twilio_call_status(call_sid: str, user=Depends(_get_user)) -> JSONResponse:
-    status = _get_call_status(call_sid)
-    if status is None:
-        raise HTTPException(status_code=404, detail="call_sid not found")
-    return JSONResponse({"call_sid": call_sid, "status": status})
-
-
-@app.post("/twilio/incoming")
-async def twilio_incoming(request: Request) -> Response:
-    form = await request.form()
-    _validate_twilio_sig(request, dict(form))
-
-    restaurant_name = request.query_params.get("restaurant_name", "")
-
-    # Fetch a short-lived signed token to avoid exposing the API key in TwiML
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    ws_url = None
-    with _track("elevenlabs_token:twilio") as t:
-        try:
-            resp = _requests.get(
-                "https://api.elevenlabs.io/v1/convai/conversation/token",
-                params={"agent_id": AGENT_ID},
-                headers={"xi-api-key": api_key},
-                timeout=5,
-            )
-            if resp.ok:
-                token = resp.json().get("token")
-                if token:
-                    ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={token}"
-            else:
-                t.outcome = f"http_{resp.status_code}"
-                _log(logging.ERROR, "elevenlabs_token_fetch_bad_status", status=resp.status_code)
-        except Exception:
-            t.outcome = "error"
-            _log(logging.ERROR, "elevenlabs_token_fetch_failed", exc=True)
-
-    if not ws_url:
-        # The call is already ringing; without a token we can only apologise and
-        # hang up. This path used to be silent — now it's logged loudly above.
-        _log(logging.ERROR, "twilio_incoming_no_ws_url", restaurant_name=restaurant_name)
-        error_twiml = VoiceResponse()
-        error_twiml.say("Si è verificato un errore tecnico. Riprova più tardi.", language="it-IT")
-        error_twiml.hangup()
-        return Response(content=str(error_twiml), media_type="text/xml")
-
-    response = VoiceResponse()
-    connect = Connect()
-    stream = Stream(url=ws_url)
-    connect.append(stream)
-    response.append(connect)
-
-    return Response(content=str(response), media_type="text/xml")
 
 # ---------------------------------------------------------------------------
 # Scrape endpoint
