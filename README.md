@@ -6,6 +6,8 @@ The user talks to an AI in the browser (text or voice, IT/EN/ES). Once the agent
 
 Live demo: **https://shy-order.onrender.com** (Stripe is in test mode — the payment UI is fully wired up, but no real card is ever charged. See [Billing](#billing) below.)
 
+> **Note on the phone leg:** the Twilio account is a **trial**, which can only place calls to *verified* numbers. The browser conversation, booking flow, and the outbound-call logic are all fully live; the actual phone call is therefore demoable to a verified number (the `TWILIO_OVERRIDE_TO` env var redirects every call to one fixed verified number for exactly this reason). Going to production is just a paid Twilio number away — no code change.
+
 ---
 
 ## How it works — in three lines
