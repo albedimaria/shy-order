@@ -133,6 +133,7 @@ Created by [`migrations/`](migrations/):
 | `tool_metrics` | `id`, `tool`, `duration_ms`, `outcome`, `call_sid`, `conversation_id`, `created_at` | service-role only |
 | `call_outcomes` | `conversation_id` (PK), `call_sid`, `status`, `call_successful`, `transcript_summary`, `duration_seconds`, `evaluation_results` (jsonb), `restaurant_name` | service-role only |
 | `eval_runs` / `eval_results` | offline `/scrape` eval: run rollup (`success_rate`, `avg_score`, `p50/p95_ms`) + per-scenario drill-down | service-role only |
+| `order_history` | persistent memory: `user_id`, `caller_conversation_id` (UNIQUE), `restaurant_name`, `booking_type`, `items` (jsonb) | SELECT own rows |
 
 (`call_statuses` from migration 002 is now unused — it backed the old hand-rolled Twilio polling, which the native integration replaced. Left in place but no longer written.)
 
@@ -242,6 +243,39 @@ The honest constraint shapes this entirely: **ElevenLabs owns the audio loop** (
 This is the deliberate point: you measure a platform-native agent at the **edges you control** (backend round-trips, call outcomes, extraction accuracy) and via the **platform's own evaluation hooks** — not by inventing audio-pipeline metrics you don't own. A companion dashboard (`/dashboard/observability`, `/dashboard/evals`, separate repo) reads these tables.
 
 ---
+
+## Persistent memory layer — "il solito?" for returning users
+
+ElevenLabs is **stateless per conversation**: when a session ends, the agent forgets everything. This layer lives in the backend and survives across sessions, so the website assistant can greet a returning user with *"l'ultima volta hai preso sushi da PepeVerde — stesso ordine?"*.
+
+**Write — after a successful call.** When the restaurant call ends with `call_successful: "success"`, `_record_order` persists one row to `order_history` (`user_id`, `restaurant_name`, `booking_type`, `items` jsonb, `created_at`). The source of truth is **hybrid**: the structured booking details the agent passed to `make_restaurant_call` are the base, and one forced tool call over the transcript summary overrides only the fields renegotiated on the phone (e.g. 20:00 → 21:30 — real case). If extraction fails, the base survives untouched. Writes fire from **both** outcome paths — the synchronous one and `check_call_status` for long calls that returned `in_progress` (the booking details are recovered from the caller conversation's own `conversation_initiation_client_data`, so no state has to be threaded through). `caller_conversation_id UNIQUE` + upsert makes the double trigger idempotent. Best-effort: a memory failure never breaks the call.
+
+**Read — at session start.** `/session/start` returns a `last_orders` string: the user's ≤3 most recent orders **younger than 90 days** (an 8-month-old order is not "il solito"), pre-formatted as speakable Italian lines with relative dates computed server-side (the LLM never does date math):
+
+```
+PepeVerde — asporto: 2x sushi misto, 1x ramen (5 giorni fa)
+Trattoria da Roma — tavolo per 2 alle 21:30 (3 settimane fa)
+```
+
+The frontend passes it to the assistant as the `last_orders` dynamic variable; empty string for new users (the prompt is told to stay silent then).
+
+**Privacy.** Rows are per-user (RLS `SELECT`-own policy, same pattern as `sessions`); no raw transcripts are stored — items, restaurant, date only. GDPR right-to-erasure is self-service: `DELETE /memory` (authenticated) wipes the caller's own history.
+
+**Wiring still to apply by hand** (out of band, like all agent config):
+
+1. *Frontend* — pass the variable in `index.html`'s `Conversation.startSession`:
+   ```js
+   const { signed_url, session_id, last_orders } = await res.json();
+   // ...
+   dynamicVariables: {
+     user_language: t.langName,
+     call_language_note: CALL_LANGUAGE_NOTE,
+     last_orders: last_orders || "",
+   },
+   ```
+2. *Website-assistant agent (EL dashboard)* — add a `last_orders` **dynamic variable placeholder** with empty default (so conversations never fail on a missing variable), and add to the prompt, e.g. under `##Tools`/`##Goal`:
+   > Ordini recenti dell'utente (vuoto se nuovo): {{last_orders}}
+   > Se non è vuoto, apri proponendo con naturalezza di ripetere l'ultimo ordine ("Bentornato! L'ultima volta … — faccio lo stesso?") prima di raccogliere tutto da zero. Se è vuoto, non menzionare nulla.
 
 ## Bugs found and fixed
 

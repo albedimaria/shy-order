@@ -9,7 +9,7 @@ import re
 import socket
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
 import requests as _requests
@@ -401,6 +401,217 @@ def _persist_call_outcome(conversation_id: str, *, call_sid: str = "",
         _log(logging.WARNING, "call_outcome_persist_failed", exc=True, conversation_id=conversation_id)
 
 
+# ---------------------------------------------------------------------------
+# Persistent memory layer — order_history (migration 007)
+# ---------------------------------------------------------------------------
+# ElevenLabs is stateless per conversation; this is the piece that survives
+# across sessions so the website assistant can propose "il solito" to a
+# returning user. MVP: items + restaurant + date, no raw transcripts.
+
+_EXTRACT_CONFIRMED_ORDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "extract_confirmed_order",
+        "description": "Record the FINAL details agreed with the restaurant, as negotiated on the call.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                    "description": "Confirmed order items with quantities (takeaway). null if unchanged/not mentioned.",
+                },
+                "party_size": {"type": ["string", "null"]},
+                "time": {"type": ["string", "null"],
+                         "description": "The FINAL agreed time (e.g. the fallback if the preferred slot was unavailable)."},
+                "date": {"type": ["string", "null"]},
+                "pickup_time": {"type": ["string", "null"]},
+            },
+            "required": ["items", "party_size", "time", "date", "pickup_time"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _extract_confirmed_order(summary: str, base: dict) -> dict:
+    """Hybrid source of truth: the tool parameters are the base (what the user
+    asked for); one forced tool call over the transcript summary overrides the
+    fields that were renegotiated on the call (e.g. 20:00 -> 21:30). Falls back
+    to the base untouched if the LLM call fails or returns nothing."""
+    payload = dict(base)
+    if not _openai_client or not summary:
+        return payload
+    try:
+        resp = _openai_client.chat.completions.create(
+            model=_OPENAI_MODEL,
+            tools=[_EXTRACT_CONFIRMED_ORDER_TOOL],
+            tool_choice={"type": "function", "function": {"name": "extract_confirmed_order"}},
+            messages=[{
+                "role": "user",
+                "content": (
+                    "This is the summary of a phone call our assistant made to a restaurant "
+                    "to place the booking/order below. Extract the FINAL agreed details. "
+                    "Return null for any field the summary does not change.\n\n"
+                    f"Requested: {json.dumps(base, ensure_ascii=False)}\n\nCall summary: {summary}"
+                ),
+            }],
+        )
+        tool_calls = resp.choices[0].message.tool_calls
+        if tool_calls:
+            confirmed = json.loads(tool_calls[0].function.arguments)
+            for k, v in confirmed.items():
+                if v:  # null/empty = keep the requested value
+                    payload[k] = v
+    except Exception:
+        _log(logging.WARNING, "confirmed_order_extraction_failed", exc=True)
+    return payload
+
+
+def _resolve_user_id(website_conversation_id: str) -> str | None:
+    """Website conversation -> session -> user. The linkage /session/link wrote."""
+    if not supabase_admin or not website_conversation_id:
+        return None
+    try:
+        res = supabase_admin.table("sessions").select("user_id").eq(
+            "elevenlabs_conversation_id", website_conversation_id).limit(1).execute()
+        if res.data:
+            return res.data[0]["user_id"]
+    except Exception:
+        _log(logging.WARNING, "order_history_user_lookup_failed", exc=True,
+             conversation_id=website_conversation_id)
+    return None
+
+
+def _record_order(caller_conversation_id: str, website_conversation_id: str = "") -> None:
+    """Best-effort: persist a successful call into order_history.
+
+    Fetches the caller conversation once — it carries everything we need:
+    the ORIGINAL booking details (conversation_initiation_client_data.dynamic_variables,
+    so this also works from check_call_status, which has no tool parameters) and
+    the transcript summary (what was actually agreed). Upsert on
+    caller_conversation_id makes the double trigger (make_restaurant_call +
+    check_call_status) idempotent. Never breaks the request it's attached to."""
+    if not supabase_admin or not caller_conversation_id:
+        return
+    try:
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        r = _requests.get(
+            f"https://api.elevenlabs.io/v1/convai/conversations/{caller_conversation_id}",
+            headers={"xi-api-key": api_key}, timeout=10,
+        )
+        d = r.json()
+    except Exception:
+        _log(logging.WARNING, "order_record_fetch_failed", exc=True,
+             conversation_id=caller_conversation_id)
+        return
+    analysis = d.get("analysis") or {}
+    if d.get("status") != "done" or analysis.get("call_successful") != "success":
+        return  # only successful calls become memory
+
+    dyn = ((d.get("conversation_initiation_client_data") or {}).get("dynamic_variables") or {})
+    restaurant_name = (dyn.get("restaurant_name") or "").strip()
+    booking_type = (dyn.get("booking_type") or "prenotazione").strip() or "prenotazione"
+    if not restaurant_name:
+        return
+
+    # Recover the website conversation (and thus the user) when not passed in.
+    if not website_conversation_id:
+        try:
+            row = supabase_admin.table("call_outcomes").select("website_conversation_id").eq(
+                "conversation_id", caller_conversation_id).limit(1).execute()
+            if row.data:
+                website_conversation_id = row.data[0].get("website_conversation_id") or ""
+        except Exception:
+            _log(logging.WARNING, "order_record_outcome_lookup_failed", exc=True,
+                 conversation_id=caller_conversation_id)
+    user_id = _resolve_user_id(website_conversation_id)
+    if not user_id:
+        _log(logging.INFO, "order_record_skipped_no_user",
+             conversation_id=caller_conversation_id)
+        return
+
+    if booking_type == "asporto":
+        raw = (dyn.get("order_items") or "").strip()
+        base = {
+            "items": [s.strip() for s in raw.split(",") if s.strip()],
+            "pickup_time": (dyn.get("pickup_time") or "").strip(),
+        }
+    else:
+        base = {
+            "party_size": (dyn.get("party_size") or "").strip(),
+            "time": (dyn.get("time_primary") or "").strip(),
+            "date": (dyn.get("date") or "").strip(),
+        }
+    payload = _extract_confirmed_order(analysis.get("transcript_summary") or "", base)
+    payload = {k: v for k, v in payload.items() if v}  # drop empties
+
+    try:
+        supabase_admin.table("order_history").upsert({
+            "user_id": user_id,
+            "caller_conversation_id": caller_conversation_id,
+            "restaurant_name": restaurant_name,
+            "booking_type": booking_type,
+            "items": payload,
+        }, on_conflict="caller_conversation_id").execute()
+        _log(logging.INFO, "order_recorded", conversation_id=caller_conversation_id,
+             restaurant_name=restaurant_name, booking_type=booking_type)
+    except Exception:
+        _log(logging.WARNING, "order_record_persist_failed", exc=True,
+             conversation_id=caller_conversation_id)
+
+
+def _relative_date_it(created_at: str) -> str:
+    """'oggi' / 'ieri' / 'N giorni fa' / 'N settimane fa' — computed here so the
+    LLM never has to do date math (it would hallucinate)."""
+    try:
+        then = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except Exception:
+        return ""
+    days = max(0, (datetime.now(timezone.utc) - then).days)
+    if days == 0:
+        return "oggi"
+    if days == 1:
+        return "ieri"
+    if days < 14:
+        return f"{days} giorni fa"
+    return f"{days // 7} settimane fa"
+
+
+def _get_last_orders(user_id: str, n: int = 3, max_age_days: int = 90) -> str:
+    """The user's recent orders as compact speakable Italian lines (one per order),
+    for the website assistant's last_orders dynamic variable. Empty string when
+    there's no history — the prompt is told to stay silent in that case.
+    Decay: an 8-month-old order isn't 'il solito' — filter at read time."""
+    if not supabase_admin or not user_id:
+        return ""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    try:
+        res = (supabase_admin.table("order_history").select("*")
+               .eq("user_id", user_id).gte("created_at", cutoff)
+               .order("created_at", desc=True).limit(n).execute())
+        rows = res.data or []
+    except Exception:
+        _log(logging.WARNING, "last_orders_read_failed", exc=True, user_id=user_id)
+        return ""
+    lines = []
+    for row in rows:
+        p = row.get("items") or {}
+        when = _relative_date_it(row.get("created_at") or "")
+        if row.get("booking_type") == "asporto":
+            what = ", ".join(p.get("items") or []) or "asporto"
+            line = f"{row['restaurant_name']} — asporto: {what}"
+        else:
+            bits = []
+            if p.get("party_size"):
+                bits.append(f"tavolo per {p['party_size']}")
+            if p.get("time"):
+                bits.append(f"alle {p['time']}")
+            line = f"{row['restaurant_name']} — {' '.join(bits) or 'prenotazione'}"
+        lines.append(f"{line} ({when})" if when else line)
+    return "\n".join(lines)
+
+
 def make_restaurant_call_tool(parameters: dict) -> dict:
     # __conversation_id__ is the WEBSITE conversation (for analytics linking)
     website_conversation_id = parameters.pop("__conversation_id__", "")
@@ -469,6 +680,8 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         outcome = _conversation_outcome(caller_conversation_id)
         if outcome.get("call_status") == "done":
             _persist()  # observability: persist the final outcome (best-effort)
+            if outcome.get("call_successful") == "success":
+                _record_order(caller_conversation_id, website_conversation_id)  # memory layer
             return {"success": True, "call_sid": call_sid,
                     "conversation_id": caller_conversation_id, **outcome}
 
@@ -487,6 +700,10 @@ def check_call_status_tool(parameters: dict) -> dict:
     if not outcome:
         return {"success": False, "error": "conversation not found"}
     _persist_call_outcome(conversation_id)  # refresh the outcome row (analysis now complete)
+    if outcome.get("call_successful") == "success":
+        # Long calls return in_progress from make_restaurant_call; the order is
+        # recorded here instead (params recovered from the conversation itself).
+        _record_order(conversation_id)
     return {"success": True, "conversation_id": conversation_id, **outcome}
 
 
@@ -847,7 +1064,13 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"ElevenLabs error: {e}")
 
-    return JSONResponse({"signed_url": signed_url, "session_id": session_id})
+    # Memory layer: the user's recent orders (<=3, last 90 days) as a speakable
+    # string. The frontend passes it to the assistant as the last_orders dynamic
+    # variable so it can propose "il solito". Empty string for new users.
+    last_orders = _get_last_orders(str(user.id))
+
+    return JSONResponse({"signed_url": signed_url, "session_id": session_id,
+                         "last_orders": last_orders})
 
 
 @app.post("/session/end")
@@ -936,6 +1159,22 @@ def session_link(req: SessionLinkRequest, user=Depends(_get_user)) -> JSONRespon
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return JSONResponse({"ok": True})
+
+
+@app.delete("/memory")
+def delete_memory(user=Depends(_get_user)) -> JSONResponse:
+    """GDPR right-to-erasure for the memory layer: the logged-in user deletes
+    their own order history. Self-service — no admin in the loop."""
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    try:
+        res = supabase_admin.table("order_history").delete().eq(
+            "user_id", str(user.id)).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    deleted = len(res.data or [])
+    _log(logging.INFO, "order_history_deleted", user_id=str(user.id), deleted=deleted)
+    return JSONResponse({"deleted": deleted})
 
 # ---------------------------------------------------------------------------
 # Scrape endpoint

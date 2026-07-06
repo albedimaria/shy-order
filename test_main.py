@@ -229,3 +229,117 @@ def test_caller_dynamic_vars_always_complete():
     assert dyn["party_size"] == "2"          # coerced to string
     assert dyn["order_items"] == ""          # unset → empty, never missing
     assert set(main._BOOKING_VAR_KEYS).issubset(dyn)
+
+
+# ---------------------------------------------------------------------------
+# Persistent memory layer (order_history)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+
+@pytest.mark.parametrize("days, expected", [
+    (0, "oggi"), (1, "ieri"), (5, "5 giorni fa"), (13, "13 giorni fa"), (21, "3 settimane fa"),
+])
+def test_relative_date_it(days, expected):
+    iso = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    assert main._relative_date_it(iso) == expected
+
+
+class _FakeOrderQuery:
+    """Records the filters _get_last_orders applies, returns preset rows."""
+    def __init__(self, rows):
+        self._rows = rows
+        self.filters = {}
+    def select(self, *a, **k):
+        return self
+    def eq(self, col, val):
+        self.filters["eq"] = (col, val)
+        return self
+    def gte(self, col, val):
+        self.filters["gte"] = (col, val)
+        return self
+    def order(self, *a, **k):
+        return self
+    def limit(self, n):
+        self.filters["limit"] = n
+        return self
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+class _FakeOrderSupabase:
+    def __init__(self, rows):
+        self.query = _FakeOrderQuery(rows)
+    def table(self, name):
+        assert name == "order_history"
+        return self.query
+
+
+def test_last_orders_filters_by_user_and_90_days(monkeypatch):
+    """Per-user confinement + decay: the query must filter user_id AND a 90-day cutoff."""
+    fake = _FakeOrderSupabase(rows=[])
+    monkeypatch.setattr(main, "supabase_admin", fake)
+    out = main._get_last_orders("user-123")
+    assert out == ""  # no history -> empty string, prompt stays silent
+    assert fake.query.filters["eq"] == ("user_id", "user-123")
+    col, cutoff = fake.query.filters["gte"]
+    assert col == "created_at"
+    cutoff_dt = datetime.fromisoformat(cutoff)
+    age = datetime.now(timezone.utc) - cutoff_dt
+    assert 89 <= age.days <= 90
+    assert fake.query.filters["limit"] == 3
+
+
+def test_last_orders_formats_speakable_lines(monkeypatch):
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {"restaurant_name": "PepeVerde", "booking_type": "asporto",
+         "items": {"items": ["2x sushi misto", "1x ramen"]}, "created_at": now},
+        {"restaurant_name": "Trattoria da Roma", "booking_type": "prenotazione",
+         "items": {"party_size": "2", "time": "21:30"}, "created_at": now},
+    ]
+    monkeypatch.setattr(main, "supabase_admin", _FakeOrderSupabase(rows))
+    out = main._get_last_orders("user-123")
+    lines = out.split("\n")
+    assert lines[0] == "PepeVerde — asporto: 2x sushi misto, 1x ramen (oggi)"
+    assert lines[1] == "Trattoria da Roma — tavolo per 2 alle 21:30 (oggi)"
+
+
+def test_extract_confirmed_order_falls_back_without_client(monkeypatch):
+    """Vague/failed extraction must never lose the order: base params survive."""
+    monkeypatch.setattr(main, "_openai_client", None)
+    base = {"party_size": "2", "time": "20:00"}
+    assert main._extract_confirmed_order("whatever summary", base) == base
+
+
+def test_extract_confirmed_order_merges_negotiated_fields(monkeypatch):
+    """LLM nulls keep the base; non-null values override (the negotiated time)."""
+    class _Fn:
+        arguments = '{"items": null, "party_size": null, "time": "21:30", "date": null, "pickup_time": null}'
+    class _TC:
+        function = _Fn()
+    class _Msg:
+        tool_calls = [_TC()]
+    class _Choice:
+        message = _Msg()
+    class _Resp:
+        choices = [_Choice()]
+    class _Completions:
+        def create(self, **kw):
+            return _Resp()
+    class _Chat:
+        completions = _Completions()
+    class _FakeOpenAI:
+        chat = _Chat()
+    monkeypatch.setattr(main, "_openai_client", _FakeOpenAI())
+    base = {"party_size": "2", "time": "20:00", "date": "venerdì"}
+    out = main._extract_confirmed_order("negotiated to 21:30", base)
+    assert out["time"] == "21:30"          # overridden
+    assert out["party_size"] == "2"        # null -> base kept
+    assert out["date"] == "venerdì"
+
+
+def test_delete_memory_requires_auth():
+    r = client.delete("/memory")
+    assert r.status_code in (401, 403)  # HTTPBearer rejects missing credentials
