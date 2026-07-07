@@ -6,7 +6,6 @@
   <title>Shy Order</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://js.stripe.com/v3/"></script>
-  <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
 </head>
 <body>
 
@@ -79,18 +78,21 @@
 
       <p id="no-data-hint" class="no-data-hint"></p>
 
-      <elevenlabs-convai
-        agent-id="agent_9901kjyr4vwpeyyr2rc3e37qkncs"
-        avatar-orb-color-1="#6b0f1a"
-        avatar-orb-color-2="#2d0a0f"
-        mic-muting="true"
-        transcript="true"
-      ></elevenlabs-convai>
+      <div class="call-area">
+        <button id="call-orb" class="call-orb" type="button" aria-label="">
+          <span class="orb-core"></span>
+        </button>
+        <p id="call-label" class="call-label"></p>
+        <p id="ai-disclosure" class="ai-disclosure"></p>
+        <p id="call-error" class="form-error"></p>
+      </div>
     </div>
 
   </div><!-- /.content -->
 
   <script type="module">
+    import { Conversation } from 'https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.9.0/+esm';
+
     // ── Translations ───────────────────────────────────────────────────────────
     const LANGS = {
       it: {
@@ -98,6 +100,7 @@
         tagline:        'essere timidi ha il suo fascino',
         greeting:       (name) => `ciao ${name},\nprenota un tavolo o ordina cibo senza chiamare davvero`,
         actionText:     'Parla con Shy Order',
+        aiDisclosure:   'Shy Order è un assistente AI: parli con un sistema automatico, non con una persona.',
         startCallText:  'Inizia la chiamata',
         endCallText:    'Termina la chiamata',
         listeningText:  'In ascolto…',
@@ -112,12 +115,14 @@
         logout:         'Esci',
         authError:      'Errore durante il login con Google.',
         scrapeFail:     'Nessun dato trovato.',
+        callFail:       'Impossibile avviare la chiamata.',
       },
       en: {
         langName:       'english',
         tagline:        'being shy has its charm',
         greeting:       (name) => `hey ${name},\nbook a table or order food without actually calling`,
         actionText:     'Talk to Shy Order',
+        aiDisclosure:   'Shy Order is an AI assistant: you\'re talking to an automated system, not a person.',
         startCallText:  'Start call',
         endCallText:    'End call',
         listeningText:  'Listening…',
@@ -132,12 +137,14 @@
         logout:         'Logout',
         authError:      'Error during Google login.',
         scrapeFail:     'No data found.',
+        callFail:       'Could not start the call.',
       },
       es: {
         langName:       'español',
         tagline:        'ser tímido tiene su encanto',
         greeting:       (name) => `hola ${name},\nreserva una mesa o pide comida sin llamar de verdad`,
         actionText:     'Habla con Shy Order',
+        aiDisclosure:   'Shy Order es un asistente de IA: hablas con un sistema automático, no con una persona.',
         startCallText:  'Iniciar llamada',
         endCallText:    'Finalizar llamada',
         listeningText:  'Escuchando…',
@@ -152,6 +159,7 @@
         logout:         'Salir',
         authError:      'Error durante el inicio de sesión con Google.',
         scrapeFail:     'No se encontraron datos.',
+        callFail:       'No se pudo iniciar la llamada.',
       },
     };
 
@@ -166,6 +174,12 @@
     let restaurantData = {};
     let currentLang    = localStorage.getItem('lang') || 'it';
     let displayName    = '';
+
+    // ── Voice call state ───────────────────────────────────────────────────────
+    let conversation     = null;          // active @elevenlabs/client Conversation
+    let activeSessionId  = null;          // backend session row id
+    let callState        = 'idle';        // idle | connecting | active | ending
+    let endingInProgress = false;         // guards a single /session/end per session
 
     // ── JWT decode ─────────────────────────────────────────────────────────────
     function parseJwt(t) {
@@ -241,6 +255,7 @@
       document.getElementById('save-card-btn').textContent   = t.saveCard;
       document.getElementById('restaurant-url').placeholder  = t.scrapeInput;
       document.getElementById('no-data-hint').textContent    = t.noDataHint;
+      document.getElementById('ai-disclosure').textContent   = t.aiDisclosure;
       document.getElementById('logout-btn').textContent      = t.logout;
 
       const scrapeBtn = document.getElementById('scrape-btn');
@@ -250,22 +265,47 @@
         b.classList.toggle('active', b.dataset.lang === lang);
       });
 
-      updateWidgetAttrs();
+      refreshCallUI();
     }
 
-    function updateWidgetAttrs() {
-      const widget = document.querySelector('elevenlabs-convai');
-      if (!widget) return;
+    // ── Voice call: dynamic variables forced for every conversation ─────────────
+    const CALL_LANGUAGE_NOTE =
+      'The actual phone call to the restaurant must always be made in Italian, ' +
+      'regardless of the language being used with the user.';
+
+    // Re-render the orb label/aria for the current state in the current language.
+    function refreshCallUI() {
+      const orb   = document.getElementById('call-orb');
+      const label = document.getElementById('call-label');
+      if (!orb || !label) return;
       const t = LANGS[currentLang];
-      widget.setAttribute('dynamic-variables', JSON.stringify({
-        user_language:      t.langName,
-        call_language_note: 'The actual phone call to the restaurant must always be made in Italian, regardless of the language being used with the user.',
-      }));
-      widget.setAttribute('action-text',     t.actionText);
-      widget.setAttribute('start-call-text', t.startCallText);
-      widget.setAttribute('end-call-text',   t.endCallText);
-      widget.setAttribute('listening-text',  t.listeningText);
-      widget.setAttribute('speaking-text',   t.speakingText);
+      switch (callState) {
+        case 'idle':
+          label.textContent = t.actionText;
+          orb.setAttribute('aria-label', t.startCallText);
+          break;
+        case 'connecting':
+          label.textContent = t.startCallText + '…';
+          orb.setAttribute('aria-label', t.startCallText);
+          break;
+        case 'active':
+          label.textContent = orb.classList.contains('speaking') ? t.speakingText : t.listeningText;
+          orb.setAttribute('aria-label', t.endCallText);
+          break;
+        case 'ending':
+          label.textContent = t.endCallText + '…';
+          orb.setAttribute('aria-label', t.endCallText);
+          break;
+      }
+    }
+
+    function setCallState(state) {
+      callState = state;
+      const orb = document.getElementById('call-orb');
+      orb.classList.remove('connecting', 'active', 'listening', 'speaking');
+      if (state === 'connecting') orb.classList.add('connecting');
+      if (state === 'active')     orb.classList.add('active', 'listening');
+      refreshCallUI();
     }
 
     document.querySelectorAll('.lang-btn').forEach(btn => {
@@ -376,6 +416,105 @@
         btn.textContent = LANGS[currentLang].scrapeBtn;
       }
     });
+
+    // ── Voice call lifecycle ─────────────────────────────────────────────────────
+    // Click handler: orb is a single toggle — start when idle, end when active.
+    document.getElementById('call-orb').addEventListener('click', () => {
+      if (callState === 'idle')   startCall();
+      else if (callState === 'active') endCall();
+      // ignore clicks while 'connecting' / 'ending'
+    });
+
+    async function startCall() {
+      if (callState !== 'idle') return;
+      const errEl = document.getElementById('call-error');
+      errEl.textContent = '';
+      setCallState('connecting');
+
+      try {
+        // Make sure the access token is fresh before hitting the backend.
+        const ok = await ensureFreshToken();
+        if (!ok) throw new Error(LANGS[currentLang].authError);
+
+        // 1. Backend checks the payment method, creates the session row, and
+        //    returns a short-lived signed WebSocket URL.
+        const res = await api('/session/start', { method: 'POST' });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || LANGS[currentLang].callFail);
+        }
+        const { signed_url, session_id, last_orders } = await res.json();
+        activeSessionId = session_id;
+
+        // 2. Open the conversation over the signed URL (WebSocket transport).
+        const t = LANGS[currentLang];
+        conversation = await Conversation.startSession({
+          signedUrl:       signed_url,
+          connectionType:  'websocket',
+          dynamicVariables: {
+            user_language:      t.langName,
+            call_language_note: CALL_LANGUAGE_NOTE,
+            // Returning-customer memory: speakable summary of the user's last
+            // orders (empty string for new users). The assistant proposes
+            // "il solito" only when this is non-empty.
+            last_orders:        last_orders || '',
+          },
+          onConnect: ({ conversationId }) => {
+            setCallState('active');
+            // 3. Link the ElevenLabs conversation to the session for analytics.
+            api('/session/link', {
+              method: 'POST',
+              body: JSON.stringify({ session_id: activeSessionId, conversation_id: conversationId }),
+            }).catch(() => {});
+          },
+          onModeChange: ({ mode }) => {
+            if (callState !== 'active') return;
+            const orb = document.getElementById('call-orb');
+            const speaking = mode === 'speaking';
+            orb.classList.toggle('speaking', speaking);
+            orb.classList.toggle('listening', !speaking);
+            refreshCallUI();
+          },
+          onDisconnect: () => { endCallCleanup(); },
+          onError: (message) => { console.error('ConvAI error:', message); },
+        });
+      } catch (err) {
+        // Connection never established → release the UI without charging.
+        conversation = null;
+        activeSessionId = null;
+        setCallState('idle');
+        errEl.textContent = err.message || String(err);
+      }
+    }
+
+    async function endCall() {
+      if (!conversation) { endCallCleanup(); return; }
+      setCallState('ending');
+      try {
+        await conversation.endSession();   // resolves via onDisconnect → endCallCleanup
+      } catch (_) {
+        endCallCleanup();
+      }
+    }
+
+    // 4. Close the session: compute server-side duration and charge Stripe.
+    //    Guarded so it fires exactly once per session (endSession + onDisconnect
+    //    can both land here).
+    async function endCallCleanup() {
+      const sessionId = activeSessionId;
+      conversation = null;
+      activeSessionId = null;
+      setCallState('idle');
+      if (!sessionId || endingInProgress) return;
+      endingInProgress = true;
+      try {
+        await api('/session/end', { method: 'POST', body: JSON.stringify({ session_id: sessionId }) });
+      } catch (_) {
+        // Never trap the user in a broken UI; the session row stays open if this fails.
+      } finally {
+        endingInProgress = false;
+      }
+    }
 
     // ── Logout ─────────────────────────────────────────────────────────────────
     document.getElementById('logout-btn').addEventListener('click', () => {
