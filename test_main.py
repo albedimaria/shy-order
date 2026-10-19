@@ -425,3 +425,18 @@ def test_make_call_blocks_real_numbers_without_override(monkeypatch):
     monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
     out = main.make_restaurant_call_tool({"phone_number": "+390289406277", "restaurant_name": "X"})
     assert out["success"] is False and "chiamate reali disattivate" in out["error"]
+
+
+def test_make_call_is_idempotent_while_call_in_progress(monkeypatch):
+    monkeypatch.setattr(main, "_TWILIO_OVERRIDE_TO", "+390000000000")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    main._ACTIVE_CALLS.clear()
+    main._ACTIVE_CALLS["conv_site_1"] = ("conv_caller_1", "CA1", main.time.time())
+    monkeypatch.setattr(main, "_conversation_outcome", lambda cid: {"call_status": "processing"})
+    def _no_new_call(*a, **k):
+        raise AssertionError("non deve partire una seconda telefonata")
+    monkeypatch.setattr(main._requests, "post", _no_new_call)
+    out = main.make_restaurant_call_tool({"phone_number": "+390289406277", "restaurant_name": "X",
+                                          "__conversation_id__": "conv_site_1"})
+    assert out["conversation_id"] == "conv_caller_1" and out["call_status"] == "in_progress"
+    main._ACTIVE_CALLS.clear()

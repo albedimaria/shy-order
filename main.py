@@ -685,6 +685,13 @@ def _get_last_orders(user_id: str, n: int = 3, max_age_days: int = 90) -> str:
     return "\n".join(lines)
 
 
+# Idempotenza della chiamata in uscita: se l'agente del sito richiama il tool (per esempio perche'
+# un'interruzione ha abbandonato la prima esecuzione) non parte una seconda telefonata.
+# Prova live del 19/10: 5 chiamate in un minuto. In memoria: Render gira con un solo processo.
+_ACTIVE_CALLS: dict[str, tuple[str, str, float]] = {}
+_ACTIVE_CALL_TTL_S = 180
+
+
 def make_restaurant_call_tool(parameters: dict) -> dict:
     # __conversation_id__ is the WEBSITE conversation (for analytics linking)
     website_conversation_id = parameters.pop("__conversation_id__", "")
@@ -698,6 +705,18 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
     api_key = os.getenv("ELEVENLABS_API_KEY", "")
     if not api_key:
         return {"success": False, "error": "ELEVENLABS_API_KEY not configured"}
+
+    call_key = website_conversation_id or phone_number
+    active = _ACTIVE_CALLS.get(call_key)
+    if active and time.time() - active[2] < _ACTIVE_CALL_TTL_S:
+        outcome = _conversation_outcome(active[0])
+        if outcome.get("call_status") != "done":
+            _log(logging.INFO, "duplicate_call_suppressed", conversation_id=active[0])
+            return {"success": True, "call_sid": active[1], "conversation_id": active[0],
+                    "call_status": "in_progress",
+                    "note": "La chiamata al ristorante e' gia' in corso: non rilanciarla. Usa check_call_status."}
+        return {"success": True, "call_sid": active[1], "conversation_id": active[0], **outcome}
+
     if not AGENT_PHONE_NUMBER_ID:
         return {"success": False, "error": "AGENT_PHONE_NUMBER_ID not configured"}
 
@@ -731,6 +750,7 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
 
     caller_conversation_id = data.get("conversation_id", "")
     call_sid = data.get("callSid", "")
+    _ACTIVE_CALLS[call_key] = (caller_conversation_id, call_sid, time.time())
 
     # Analytics: bump the restaurant's call count and link it to the website session.
     if supabase_admin and restaurant_name:
