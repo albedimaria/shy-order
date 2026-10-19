@@ -423,10 +423,13 @@ def _conversation_outcome(conversation_id: str) -> dict:
     except Exception:
         return {}
     analysis = d.get("analysis") or {}
+    collected = {k: (v or {}).get("value") for k, v in (analysis.get("data_collection_results") or {}).items()}
     return {
         "call_status": d.get("status"),
         "call_successful": analysis.get("call_successful"),
         "summary": analysis.get("transcript_summary") or "",
+        # Campi strutturati estratti dalla piattaforma (data collection dell'agente chiamante).
+        "details": {k: collected.get(k) for k in ("esito", "orario_confermato", "persone", "nota")},
     }
 
 
@@ -1262,6 +1265,50 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
              session_id=req.session_id, payment_intent_id=pi_id, amount_charged=amount_cents)
 
     return JSONResponse({"amount_charged": amount_cents, "duration_seconds": duration_seconds})
+
+
+@app.get("/session/call-outcome")
+def session_call_outcome(conversation_id: str, user=Depends(_get_user)) -> JSONResponse:
+    """Esito della telefonata al ristorante per la conversazione del sito, per la scheda nella UI.
+
+    state: none (nessuna chiamata) | in_progress | done. Solo la sessione dell'utente stesso.
+    """
+    if not supabase_admin or not conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
+    owned = (supabase_admin.table("sessions").select("id")
+             .eq("elevenlabs_conversation_id", conversation_id).eq("user_id", str(user.id))
+             .execute().data)
+    if not owned:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    caller_id, restaurant = "", ""
+    active = _ACTIVE_CALLS.get(conversation_id)
+    if active:
+        caller_id = active[0]
+    rows = (supabase_admin.table("call_outcomes").select("conversation_id, restaurant_name")
+            .eq("website_conversation_id", conversation_id).order("updated_at", desc=True).limit(1)
+            .execute().data)
+    if rows:
+        caller_id = caller_id or rows[0]["conversation_id"]
+        restaurant = rows[0].get("restaurant_name") or ""
+    if not caller_id:
+        return JSONResponse({"state": "none"})
+
+    outcome = _conversation_outcome(caller_id)
+    if outcome.get("call_status") != "done":
+        return JSONResponse({"state": "in_progress", "restaurant_name": restaurant})
+    _persist_call_outcome(caller_id)
+    details = outcome.get("details") or {}
+    return JSONResponse({
+        "state": "done",
+        "success": outcome.get("call_successful") == "success",
+        "restaurant_name": restaurant,
+        "esito": details.get("esito"),
+        "orario_confermato": details.get("orario_confermato"),
+        "persone": details.get("persone"),
+        "nota": details.get("nota"),
+        "summary": outcome.get("summary") or "",
+    })
 
 
 @app.post("/session/link")

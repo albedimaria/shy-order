@@ -440,3 +440,54 @@ def test_make_call_is_idempotent_while_call_in_progress(monkeypatch):
                                           "__conversation_id__": "conv_site_1"})
     assert out["conversation_id"] == "conv_caller_1" and out["call_status"] == "in_progress"
     main._ACTIVE_CALLS.clear()
+
+
+class _ChainQuery:
+    """Fake minimale per query a catena (select/eq/order/limit/execute) per tabella."""
+    def __init__(self, rows):
+        self._rows = rows
+    def select(self, *a, **k): return self
+    def eq(self, *a, **k): return self
+    def order(self, *a, **k): return self
+    def limit(self, *a, **k): return self
+    def update(self, *a, **k): return self
+    def upsert(self, *a, **k): return self
+    def execute(self): return type("R", (), {"data": self._rows})()
+
+
+class _TablesSupabase:
+    def __init__(self, tables):
+        self._tables = tables
+    def table(self, name):
+        return _ChainQuery(self._tables.get(name, []))
+
+
+def test_call_outcome_requires_own_session(monkeypatch):
+    monkeypatch.setattr(main, "supabase_admin", _TablesSupabase({"sessions": []}))
+    main.app.dependency_overrides[main._get_user] = lambda: type("U", (), {"id": "u1"})()
+    try:
+        r = client.get("/session/call-outcome", params={"conversation_id": "conv_site_x"})
+        assert r.status_code == 404
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_call_outcome_done_returns_structured_details(monkeypatch):
+    monkeypatch.setattr(main, "supabase_admin", _TablesSupabase({
+        "sessions": [{"id": "s1"}],
+        "call_outcomes": [{"conversation_id": "conv_caller_1", "restaurant_name": "PepeVerde"}],
+    }))
+    monkeypatch.setattr(main, "_persist_call_outcome", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_conversation_outcome", lambda cid: {
+        "call_status": "done", "call_successful": "success", "summary": "ok",
+        "details": {"esito": "prenotato", "orario_confermato": "21:30", "persone": "2", "nota": "Pieni alle 21, confermato alle 21:30"},
+    })
+    main._ACTIVE_CALLS.clear()
+    main.app.dependency_overrides[main._get_user] = lambda: type("U", (), {"id": "u1"})()
+    try:
+        r = client.get("/session/call-outcome", params={"conversation_id": "conv_site_1"})
+        body = r.json()
+        assert r.status_code == 200 and body["state"] == "done" and body["success"] is True
+        assert body["orario_confermato"] == "21:30" and body["restaurant_name"] == "PepeVerde"
+    finally:
+        main.app.dependency_overrides.clear()
