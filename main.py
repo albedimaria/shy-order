@@ -327,6 +327,62 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
     return {"found": False}
 
 
+def _normalize_it_phone(raw: str) -> str:
+    """'+39 02 8940 6277', '02 89406277', '0039...' -> '+390289406277'. Stringa vuota se non e' un numero italiano plausibile."""
+    digits = re.sub(r"[^0-9+]", "", raw or "")
+    if digits.startswith("0039"):
+        digits = "+39" + digits[4:]
+    elif digits.startswith("39") and not digits.startswith("+"):
+        digits = "+" + digits
+    elif not digits.startswith("+"):
+        digits = "+39" + digits
+    if not digits.startswith("+39") or not _is_e164(digits) or not (11 <= len(digits) <= 14):
+        return ""
+    return digits
+
+
+def find_restaurant_tool(parameters: dict) -> dict:
+    """Cerca sul web il telefono di un ristorante che non e' in rubrica (OpenAI Responses + web_search).
+
+    Il numero trovato NON e' verificato: il prompt impone di ripeterlo all'utente prima di chiamare.
+    Accetta solo numeri italiani in E.164; tutto il resto torna come found: false.
+    """
+    name = (parameters.get("restaurant_name") or parameters.get("name") or "").strip()
+    city = (parameters.get("city") or "").strip()
+    if not name:
+        return {"found": False, "error": "restaurant_name is required"}
+    if not _openai_client:
+        return {"found": False, "error": "web search not configured"}
+    where = f" a {city}" if city else " in Italia"
+    prompt = (
+        f"Trova il ristorante '{name}'{where}. Rispondi SOLO con un oggetto JSON, senza testo intorno: "
+        '{"name": nome ufficiale, "phone_number": telefono del locale, "address": indirizzo completo, '
+        '"source_url": pagina da cui hai preso il numero}. '
+        "Se non trovi il locale o non sei sicuro del numero, metti null in phone_number."
+    )
+    try:
+        with _track("find_restaurant:web_search"):
+            resp = _openai_client.responses.create(
+                model=_OPENAI_MODEL, tools=[{"type": "web_search"}], input=prompt, timeout=15,
+            )
+        text = resp.output_text or ""
+        data = json.loads(text[text.find("{"): text.rfind("}") + 1])
+    except Exception:
+        _log(logging.WARNING, "find_restaurant_failed", exc=True, name=name, city=city)
+        return {"found": False}
+    phone = _normalize_it_phone(data.get("phone_number") or "")
+    if not phone:
+        return {"found": False}
+    return {
+        "found": True,
+        "name": data.get("name") or name,
+        "phone_number": phone,
+        "address": data.get("address") or "",
+        "source_url": data.get("source_url") or "",
+        "verified": False,
+    }
+
+
 def save_restaurant_to_local_db_tool(parameters: dict) -> dict:
     try:
         return get_or_create_restaurant(
@@ -725,6 +781,7 @@ def check_call_status_tool(parameters: dict) -> dict:
 
 
 TOOL_REGISTRY["lookup_restaurant"] = lookup_restaurant_tool
+TOOL_REGISTRY["find_restaurant"] = find_restaurant_tool
 TOOL_REGISTRY["save_restaurant_to_local_db"] = save_restaurant_to_local_db_tool
 TOOL_REGISTRY["make_restaurant_call"] = make_restaurant_call_tool
 TOOL_REGISTRY["check_call_status"] = check_call_status_tool
