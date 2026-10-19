@@ -363,3 +363,13 @@ def test_payment_status_skips_card_when_payments_disabled(monkeypatch):
     finally:
         main.app.dependency_overrides.clear()
 
+
+
+def test_shown_payment_method_is_true_when_payments_disabled(monkeypatch):
+    # login, register e google-complete passano tutti da qui: e' da li' che il frontend
+    # decide la schermata della carta (bug del primo deploy: avevo coperto solo /payment/status).
+    monkeypatch.setattr(main, "PAYMENTS_ENABLED", False)
+    assert main._shown_payment_method(False) is True
+    monkeypatch.setattr(main, "PAYMENTS_ENABLED", True)
+    assert main._shown_payment_method(False) is False
+    assert main._shown_payment_method(True) is True

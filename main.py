@@ -113,6 +113,13 @@ _stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 # la durata della sessione si registra comunque.
 PAYMENTS_ENABLED = os.getenv("PAYMENTS_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 
+
+def _shown_payment_method(has_card: bool) -> bool:
+    """Quello che il frontend deve credere: con i pagamenti spenti, la carta "c'è" sempre.
+    Usato da TUTTE le risposte che il frontend legge per decidere la schermata della carta
+    (login, register, google-complete, payment/status)."""
+    return has_card or not PAYMENTS_ENABLED
+
 _openai_api_key = os.getenv("OPENAI_API_KEY", "")
 _openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
 _OPENAI_MODEL = "gpt-4.1-mini"
@@ -918,7 +925,7 @@ def auth_register(req: RegisterRequest) -> JSONResponse:
         "refresh_token": sign_in.session.refresh_token,
         "expires_in": sign_in.session.expires_in,
         "user": {"id": str(user.id), "email": req.email},
-        "has_payment_method": False,
+        "has_payment_method": _shown_payment_method(False),
     })
 
 
@@ -947,7 +954,7 @@ def auth_login(req: LoginRequest) -> JSONResponse:
         "refresh_token": resp.session.refresh_token,
         "expires_in": resp.session.expires_in,
         "user": {"id": str(user.id), "email": user.email},
-        "has_payment_method": has_payment_method,
+        "has_payment_method": _shown_payment_method(has_payment_method),
     })
 
 # ---------------------------------------------------------------------------
@@ -983,15 +990,15 @@ def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
             "email": user.email,
             "stripe_customer_id": customer.id,
         }).execute()
-        return JSONResponse({"has_payment_method": False})
+        return JSONResponse({"has_payment_method": _shown_payment_method(False)})
 
     stripe_customer_id = existing.data[0].get("stripe_customer_id")
     try:
         pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
-        return JSONResponse({"has_payment_method": len(pms.data) > 0})
+        return JSONResponse({"has_payment_method": _shown_payment_method(len(pms.data) > 0)})
     except Exception:
         _log(logging.WARNING, "google_pm_lookup_failed", exc=True, user_id=str(user.id))
-        return JSONResponse({"has_payment_method": False})
+        return JSONResponse({"has_payment_method": _shown_payment_method(False)})
 
 # ---------------------------------------------------------------------------
 # Payment endpoints
