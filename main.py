@@ -702,6 +702,11 @@ def make_restaurant_call_tool(parameters: dict) -> dict:
         return {"success": False, "error": "AGENT_PHONE_NUMBER_ID not configured"}
 
     # Test mode: redirect the call to a fixed number (you stand in for the restaurant).
+    # Guardia: senza override non si chiama un ristorante vero, a meno di ALLOW_REAL_CALLS=true.
+    # (find_restaurant trova numeri VERI: in demo devono squillare solo al numero di prova.)
+    if not _TWILIO_OVERRIDE_TO and os.getenv("ALLOW_REAL_CALLS", "").strip().lower() != "true":
+        _log(logging.WARNING, "real_call_blocked", restaurant_name=restaurant_name)
+        return {"success": False, "error": "demo: chiamate reali disattivate (manca TWILIO_OVERRIDE_TO)"}
     to_number = _TWILIO_OVERRIDE_TO if _TWILIO_OVERRIDE_TO else phone_number
 
     payload = {

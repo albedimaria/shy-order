@@ -417,3 +417,11 @@ def test_find_restaurant_rejects_missing_or_foreign_number(monkeypatch):
                 return _Resp()
     monkeypatch.setattr(main, "_openai_client", _Client())
     assert main.find_restaurant_tool({"restaurant_name": "X"})["found"] is False
+
+
+def test_make_call_blocks_real_numbers_without_override(monkeypatch):
+    monkeypatch.setattr(main, "_TWILIO_OVERRIDE_TO", "")
+    monkeypatch.delenv("ALLOW_REAL_CALLS", raising=False)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    out = main.make_restaurant_call_tool({"phone_number": "+390289406277", "restaurant_name": "X"})
+    assert out["success"] is False and "chiamate reali disattivate" in out["error"]
