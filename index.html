@@ -109,6 +109,16 @@
         <p id="call-error" class="form-error" role="alert"></p>
       </div>
 
+      <section id="outcome" class="outcome" role="status" aria-live="polite" hidden>
+        <span class="outcome-icon" id="outcome-icon" aria-hidden="true"></span>
+        <div class="outcome-body">
+          <p class="outcome-eyebrow" id="outcome-eyebrow"></p>
+          <p class="outcome-title" id="outcome-title"></p>
+          <p class="outcome-detail" id="outcome-detail" hidden></p>
+          <p class="outcome-note" id="outcome-note" hidden></p>
+        </div>
+      </section>
+
       <div class="scrape-section" data-reveal>
         <div id="scrape-result" class="scrape-result" aria-live="polite"></div>
         <p id="no-data-hint" class="no-data-hint"></p>
@@ -148,6 +158,16 @@
         callingText:    'Sto chiamando il ristorante…',
         callingNote:    "Resta in attesa, ti dico io com'è andata.",
         micPaused:      'Il tuo microfono è in pausa.',
+        outcomeEyebrow: 'Esito della telefonata',
+        outcomeLoading: "Recupero l'esito…",
+        outcomeCalling: 'La telefonata è ancora in corso…',
+        outcomeBooked:  (r) => r ? `Prenotato da ${r}` : 'Prenotazione confermata',
+        outcomeOrdered: (r) => r ? `Ordine confermato da ${r}` : 'Ordine confermato',
+        outcomeFailed:  (r) => r ? `Non è andata con ${r}` : 'Non è andata',
+        outcomeAt:      (h) => `alle ${h}`,
+        outcomePeople:  (n) => `${n} ${String(n) === '1' ? 'persona' : 'persone'}`,
+        outcomeNoAnswer:'Il ristorante non ha risposto.',
+        outcomeNoRoom:  "Non c'era posto.",
         googleBtn:      'Continua con Google',
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
@@ -178,6 +198,16 @@
         callingText:    'Calling the restaurant…',
         callingNote:    "Hold on, I'll tell you how it went.",
         micPaused:      'Your mic is paused.',
+        outcomeEyebrow: 'Call outcome',
+        outcomeLoading: 'Getting the outcome…',
+        outcomeCalling: 'The call is still going…',
+        outcomeBooked:  (r) => r ? `Booked at ${r}` : 'Booking confirmed',
+        outcomeOrdered: (r) => r ? `Order confirmed at ${r}` : 'Order confirmed',
+        outcomeFailed:  (r) => r ? `It didn't work out with ${r}` : "It didn't work out",
+        outcomeAt:      (h) => `at ${h}`,
+        outcomePeople:  (n) => `${n} ${String(n) === '1' ? 'person' : 'people'}`,
+        outcomeNoAnswer:"The restaurant didn't answer.",
+        outcomeNoRoom:  'They had no room.',
         googleBtn:      'Continue with Google',
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
@@ -208,6 +238,16 @@
         callingText:    'Llamando al restaurante…',
         callingNote:    'Espera, te cuento cómo ha ido.',
         micPaused:      'Tu micrófono está en pausa.',
+        outcomeEyebrow: 'Resultado de la llamada',
+        outcomeLoading: 'Recuperando el resultado…',
+        outcomeCalling: 'La llamada sigue en curso…',
+        outcomeBooked:  (r) => r ? `Reservado en ${r}` : 'Reserva confirmada',
+        outcomeOrdered: (r) => r ? `Pedido confirmado en ${r}` : 'Pedido confirmado',
+        outcomeFailed:  (r) => r ? `No ha salido bien con ${r}` : 'No ha salido bien',
+        outcomeAt:      (h) => `a las ${h}`,
+        outcomePeople:  (n) => `${n} ${String(n) === '1' ? 'persona' : 'personas'}`,
+        outcomeNoAnswer:'El restaurante no contestó.',
+        outcomeNoRoom:  'No tenían sitio.',
         googleBtn:      'Continuar con Google',
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
@@ -241,6 +281,10 @@
     let callState        = 'idle';        // idle | connecting | active | ending
     let endingInProgress = false;         // guards a single /session/end per session
     let restaurantCall   = false;         // the caller agent is on the phone with the restaurant
+    let siteConversationId = null;        // ElevenLabs id of the browser conversation (for /session/call-outcome)
+    let outcome          = null;          // last outcome payload, or { state: 'loading' | 'in_progress' }
+    let outcomePoll      = null;          // { timer } while polling
+    let outcomeGen       = 0;             // bumps on every new poll / reset, so stale polls stop
 
     // ── JWT decode ─────────────────────────────────────────────────────────────
     function parseJwt(t) {
@@ -352,6 +396,7 @@
       });
 
       refreshCallUI();
+      renderOutcome();
     }
 
     // ── Voice call: dynamic variables forced for every conversation ─────────────
@@ -403,6 +448,99 @@
       document.getElementById('call-orb').classList.toggle('calling', on);
       document.getElementById('call-note').hidden = !on;
       refreshCallUI();
+    }
+
+    // ── Outcome card ───────────────────────────────────────────────────────────
+    // After the phone tool answers, poll the backend every 3 s (max ~3 min):
+    // ElevenLabs' post-call analysis can land 10-30 s after the call ends.
+    // The card stays up after the browser conversation ends, until a new one.
+    const OUTCOME_ICONS = {
+      ok:   '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>',
+      ko:   '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg>',
+      wait: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 7v5l3 2"/></svg>',
+    };
+
+    function renderOutcome() {
+      const card = document.getElementById('outcome');
+      if (!outcome) { card.hidden = true; return; }
+      const t = LANGS[currentLang];
+      // Every value from the backend goes in with textContent only.
+      const set = (id, text) => {
+        const el = document.getElementById(id);
+        el.textContent = text || '';
+        el.hidden = !text;
+      };
+      const done = outcome.state === 'done';
+      const kind = !done ? 'wait' : outcome.success ? 'ok' : 'ko';
+      card.className = `outcome outcome--${kind}`;
+      document.getElementById('outcome-icon').innerHTML = OUTCOME_ICONS[kind];
+      set('outcome-eyebrow', t.outcomeEyebrow);
+
+      if (!done) {
+        set('outcome-title', outcome.state === 'in_progress' ? t.outcomeCalling : t.outcomeLoading);
+        set('outcome-detail', '');
+        set('outcome-note', '');
+      } else {
+        const r = outcome.restaurant_name || '';
+        const title = !outcome.success ? t.outcomeFailed(r)
+          : outcome.esito === 'ordinato' ? t.outcomeOrdered(r) : t.outcomeBooked(r);
+        const detail = outcome.success
+          ? [outcome.orario_confermato && t.outcomeAt(outcome.orario_confermato),
+             outcome.persone && t.outcomePeople(outcome.persone)].filter(Boolean).join(' · ')
+          : '';
+        const fallback = outcome.success ? ''
+          : outcome.esito === 'nessuna_risposta' ? t.outcomeNoAnswer
+          : outcome.esito === 'non_disponibile' ? t.outcomeNoRoom : '';
+        set('outcome-title', title);
+        set('outcome-detail', detail);
+        set('outcome-note', outcome.nota || fallback);
+      }
+      card.hidden = false;
+    }
+
+    function stopOutcomePolling() {
+      if (outcomePoll) clearTimeout(outcomePoll.timer);
+      outcomePoll = null;
+    }
+
+    function clearOutcome() {
+      stopOutcomePolling();
+      outcomeGen++;
+      outcome = null;
+      renderOutcome();
+    }
+
+    function startOutcomePolling() {
+      const conversationId = siteConversationId;
+      if (!conversationId || outcomePoll) return;
+      const gen = ++outcomeGen;
+      const deadline = Date.now() + 3 * 60 * 1000;
+      if (!outcome || outcome.state !== 'done') { outcome = { state: 'loading' }; renderOutcome(); }
+
+      const tick = async () => {
+        if (gen !== outcomeGen) return;
+        try {
+          const res = await api(`/session/call-outcome?conversation_id=${encodeURIComponent(conversationId)}`);
+          if (gen !== outcomeGen) return;
+          if (res.ok) {
+            const data = await res.json();
+            if (gen !== outcomeGen) return;
+            if (data.state === 'done') { outcome = data; outcomePoll = null; renderOutcome(); return; }
+            if (data.state === 'in_progress') { outcome = data; renderOutcome(); }
+          }
+        } catch (e) {
+          console.error('call-outcome poll failed:', e);
+        }
+        if (gen !== outcomeGen) return;
+        if (Date.now() > deadline) {
+          // Give up quietly: the agent has already said the outcome out loud.
+          outcomePoll = null;
+          if (outcome && outcome.state !== 'done') { outcome = null; renderOutcome(); }
+          return;
+        }
+        outcomePoll = { timer: setTimeout(tick, 3000) };
+      };
+      outcomePoll = { timer: setTimeout(tick, 1500) };
     }
 
     function setCallState(state) {
@@ -629,6 +767,8 @@
       if (callState !== 'idle') return;
       const errEl = document.getElementById('call-error');
       errEl.textContent = '';
+      clearOutcome();
+      siteConversationId = null;
       setCallState('connecting');
 
       try {
@@ -667,6 +807,7 @@
             last_orders:        last_orders || '',
           },
           onConnect: ({ conversationId }) => {
+            siteConversationId = conversationId;
             setCallState('active');
             // 3. Link the ElevenLabs conversation to the session for analytics.
             api('/session/link', {
@@ -686,7 +827,9 @@
             if (PHONE_TOOLS.has(tool_name)) setRestaurantCall(true);
           },
           onAgentToolResponse: ({ tool_name }) => {
-            if (PHONE_TOOLS.has(tool_name)) setRestaurantCall(false);
+            if (!PHONE_TOOLS.has(tool_name)) return;
+            setRestaurantCall(false);
+            startOutcomePolling();
           },
           onDisconnect: () => { endCallCleanup(); },
           onError: (message) => { console.error('ConvAI error:', message); },

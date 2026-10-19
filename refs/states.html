@@ -14,7 +14,7 @@
     if (q.get('state') === 'out') return;
     const s = w.document.createElement('script');
     s.src = '/refs/sim-state.js';
-    s.onload = () => w.simState(q.get('state') || 'idle', q.get('card') === '1');
+    s.onload = () => w.simState(q.get('state') || 'idle', q.get('card') === '1', q.get('out'));
     w.document.head.append(s);
   }, 3000);
 </script></body></html>

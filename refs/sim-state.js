@@ -1,6 +1,6 @@
 // Dev-only: paste in the console (or inject) to fake the logged-in screens
 // without a backend. Usage: simState('idle' | 'connecting' | 'listening' | 'speaking', withCard)
-window.simState = (state, withCard = true) => {
+window.simState = (state, withCard = true, out = null) => {
   const $ = (id) => document.getElementById(id);
   document.documentElement.classList.remove('reveal-pending');
   $('logo').classList.add('hidden');
@@ -22,6 +22,16 @@ window.simState = (state, withCard = true) => {
   $('call-note').hidden = state !== 'calling';
   $('call-note-text').textContent = "Resta in attesa, ti dico io com'è andata."; $('call-note-mic').textContent = 'Il tuo microfono è in pausa.';
   $('call-label').textContent = labels[state];
+  // Outcome card: out = 'ok' | 'ko' | 'wait'
+  const oc = $('outcome');
+  if (out) {
+    const data = { ok: ['Esito della telefonata', 'Prenotato da Osteria Pepe Verde', 'alle 21:30 · 2 persone', 'Pieni alle 21, confermato alle 21:30.'],
+                   ko: ['Esito della telefonata', 'Non è andata con Osteria Pepe Verde', '', 'Stasera sono al completo, nessun orario libero.'],
+                   wait: ['Esito della telefonata', "Recupero l'esito…", '', ''] }[out];
+    oc.className = 'outcome outcome--' + out; oc.hidden = false;
+    $('outcome-icon').innerHTML = { ok: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>', ko: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg>', wait: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 7v5l3 2"/></svg>' }[out];
+    ['outcome-eyebrow', 'outcome-title', 'outcome-detail', 'outcome-note'].forEach((id, i) => { $(id).textContent = data[i]; $(id).hidden = !data[i]; });
+  } else oc.hidden = true;
   const r = $('scrape-result');
   if (withCard) {
     r.className = 'scrape-result found';

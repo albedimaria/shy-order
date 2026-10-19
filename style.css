@@ -559,3 +559,50 @@ body::before {
 
 /* Disclosure under the restaurant field: its own block, not glued to the input */
 #ai-disclosure { margin-top: var(--s-4); }
+
+/* ── Outcome card: how the restaurant call went ───────────────────────── */
+
+.outcome {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  padding: var(--s-3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: left;
+}
+
+.outcome--ok { border-color: rgba(240, 180, 94, 0.45); }
+
+.outcome-icon { flex-shrink: 0; display: flex; margin-top: 2px; color: var(--text-2); }
+.outcome--ok .outcome-icon { color: var(--amber); }
+
+.outcome-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+.outcome-eyebrow { color: var(--text-2); font-size: 1rem; }
+
+.outcome-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.5rem;
+  line-height: 1.2;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.outcome--wait .outcome-title { font-family: var(--sans); font-weight: 400; font-size: 1.125rem; color: var(--text); }
+
+.outcome-detail { color: var(--text); font-size: 1.0625rem; }
+.outcome-note { color: var(--text-2); font-size: 1rem; line-height: 1.45; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .outcome:not([hidden]) { animation: outcome-in 1.2s var(--ease-out); }
+}
+
+@keyframes outcome-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
