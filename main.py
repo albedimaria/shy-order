@@ -307,9 +307,15 @@ def lookup_restaurant_tool(parameters: dict) -> dict:
     if not supabase_admin or not name_query:
         return {"found": False}
     try:
-        result = supabase_admin.table("restaurants").select("*").ilike("name", name_query).execute()
-        if result.data:
-            r = result.data[0]
+        # Il nome arriva dalla trascrizione: "Pepe Verde", "pepeverde", "Pepe-Verde" sono lo stesso
+        # ristorante. Si confronta senza spazi, punteggiatura e maiuscole (la tabella e' piccola).
+        def _norm(x: str) -> str:
+            return re.sub(r"[^0-9a-zà-ù]", "", (x or "").lower())
+        wanted = _norm(name_query)
+        rows = supabase_admin.table("restaurants").select("*").execute().data or []
+        match = next((row for row in rows if _norm(row.get("name", "")) == wanted), None)
+        if match:
+            r = match
             return {
                 "found": True,
                 "name": r["name"],

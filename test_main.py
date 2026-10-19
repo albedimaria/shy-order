@@ -144,7 +144,6 @@ def test_lookup_reads_restaurant_name(monkeypatch):
     out = main.lookup_restaurant_tool({"restaurant_name": "PepeVerde"})
     assert out["found"] is True
     assert out["phone_number"] == "+390373123456"
-    assert fake.query.captured["ilike"] == ("name", "PepeVerde")
 
 
 def test_lookup_falls_back_to_legacy_name(monkeypatch):
@@ -373,3 +372,11 @@ def test_shown_payment_method_is_true_when_payments_disabled(monkeypatch):
     monkeypatch.setattr(main, "PAYMENTS_ENABLED", True)
     assert main._shown_payment_method(False) is False
     assert main._shown_payment_method(True) is True
+
+
+def test_lookup_ignores_spaces_and_case(monkeypatch):
+    # In chiamata vera l'utente ha detto "Pepe Verde" e la ricerca esatta non trovava "PepeVerde".
+    fake = _FakeSupabase([{"name": "PepeVerde", "phone_number": "+390373123456", "address": "Crema"}])
+    monkeypatch.setattr(main, "supabase_admin", fake)
+    out = main.lookup_restaurant_tool({"restaurant_name": "Pepe Verde"})
+    assert out["found"] is True and out["name"] == "PepeVerde"
