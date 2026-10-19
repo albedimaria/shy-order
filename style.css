@@ -20,7 +20,17 @@
   --ease-breathe: cubic-bezier(.45, 0, .55, 1);
   --hover: 200ms;
 
-  --gutter: clamp(20px, 4vw, 40px);
+  --gutter: clamp(20px, 4vw, 48px);
+
+  /* Spacing scale: every gap on the page comes from here */
+  --s-1: 8px;
+  --s-2: 16px;
+  --s-3: 24px;
+  --s-4: clamp(32px, 3.6vw, 40px);
+  --s-5: clamp(40px, 5vw, 64px);
+  --s-6: clamp(56px, 7vw, 96px);
+
+  --radius: 12px;
   color-scheme: dark;
 }
 
@@ -83,7 +93,7 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px var(--gutter);
+  padding: var(--s-3) var(--gutter);
 }
 
 .brand {
@@ -95,7 +105,7 @@ body::before {
   line-height: 1;
 }
 
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-right { display: flex; align-items: center; gap: var(--s-1); }
 
 .menu-wrap { position: relative; }
 
@@ -114,7 +124,7 @@ body::before {
   transition: background-color var(--hover) ease, border-color var(--hover) ease;
 }
 
-.pill-btn { padding: 0 16px; border-radius: 999px; letter-spacing: 0.04em; }
+.pill-btn { padding: 0 14px; border-radius: var(--radius); letter-spacing: 0.04em; }
 .round-btn { width: 44px; border-radius: 50%; font-family: var(--serif); font-size: 1.125rem; }
 
 .pill-btn:hover,
@@ -170,7 +180,7 @@ body::before {
   width: 100%;
   max-width: 560px;
   margin: 0 auto;
-  padding: 8px var(--gutter) 48px;
+  padding: var(--s-2) var(--gutter) var(--s-4);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -193,7 +203,7 @@ body::before {
   font-size: clamp(2.75rem, 7.4vw, 5.5rem);
   line-height: 1.02;
   letter-spacing: -0.015em;
-  margin-top: 28px;
+  margin-top: var(--s-5);
   width: max-content;
   max-width: calc(100vw - 2 * var(--gutter));
 }
@@ -201,7 +211,7 @@ body::before {
 /* Token check in progress: only the candle, gently catching */
 .hero.is-checking .hero-title,
 .hero.is-checking .hero-sub { visibility: hidden; }
-.hero.is-checking .candle--off { animation: candle-catch 2.4s var(--ease-breathe) infinite; }
+.hero.is-checking .candle--off { animation: candle-catch 3s var(--ease-breathe) infinite; }
 
 .hero-title .line { display: block; }
 .hero-title .line--em { font-style: italic; font-weight: 400; }
@@ -212,7 +222,7 @@ body::before {
   color: var(--text-2);
   font-size: clamp(1.125rem, 1.6vw, 1.25rem);
   line-height: 1.5;
-  margin-top: 20px;
+  margin-top: var(--s-3);
   max-width: 30rem;
   text-wrap: balance;
 }
@@ -232,7 +242,7 @@ body::before {
 .hello-sub {
   color: var(--text-2);
   font-size: 1.125rem;
-  margin-top: 6px;
+  margin-top: var(--s-1);
   text-wrap: balance;
 }
 
@@ -245,8 +255,8 @@ body::before {
   align-items: center;
 }
 
-#screen-auth { margin-top: 32px; }
-#screen-main { margin-top: 28px; }
+#screen-auth { margin-top: var(--s-5); }
+#screen-main { margin-top: var(--s-4); }
 
 /* ── Buttons ──────────────────────────────────────────────────────────── */
 
@@ -259,7 +269,7 @@ body::before {
   padding: 0 28px;
   background: var(--text);
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius);
   color: var(--bg);
   cursor: pointer;
   font: 600 1.0625rem/1 var(--sans);
@@ -279,7 +289,7 @@ body::before {
 }
 
 /* Kept rendered when empty (role=alert regions must exist to be announced) */
-#auth-error, #call-error, #payment-error { margin-top: 12px; }
+#auth-error, #call-error, #payment-error { margin-top: var(--s-2); }
 #auth-error:empty, #call-error:empty, #payment-error:empty { margin-top: 0; }
 
 .disclosure {
@@ -287,7 +297,7 @@ body::before {
   font-size: 1rem;
   line-height: 1.45;
   max-width: 26rem;
-  margin-top: 20px;
+  margin-top: var(--s-3);
   text-wrap: balance;
 }
 
@@ -358,15 +368,15 @@ body::before {
 .call-orb:hover .orb-core { border-color: rgba(243, 234, 216, 0.6); }
 
 /* connecting: the candle catches, slowly */
-.call-orb.connecting .orb-glow { animation: candle-catch 2.4s var(--ease-breathe) infinite; }
+.call-orb.connecting .orb-glow { animation: candle-catch 3s var(--ease-breathe) infinite; }
 
 /* active + listening: lit, slow breath */
 .call-orb.active .orb-glow { opacity: 1; transform: scale(1); }
 .call-orb.active .orb-core { opacity: 0; }
-.call-orb.listening .orb-glow { animation: candle-breathe 3s var(--ease-breathe) infinite; }
+.call-orb.listening .orb-glow { animation: candle-breathe 3.4s var(--ease-breathe) infinite; }
 
-/* speaking: brighter, quicker breath (never under 1.2 s) */
-.call-orb.speaking .orb-glow { animation: candle-speak 1.8s var(--ease-breathe) infinite; }
+/* speaking: brighter, a little quicker (continuous loops stay >= 2.5 s) */
+.call-orb.speaking .orb-glow { animation: candle-speak 2.6s var(--ease-breathe) infinite; }
 
 /* ending: the flame goes down */
 .call-orb.ending .orb-glow { opacity: 0.2; transform: scale(0.85); }
@@ -389,7 +399,7 @@ body::before {
 .call-label {
   color: var(--text);
   font-size: 1.125rem;
-  margin-top: 24px;
+  margin-top: var(--s-3);
   min-height: 1.6em;
 }
 
@@ -400,8 +410,8 @@ body::before {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
-  margin-top: 28px;
+  gap: var(--s-2);
+  margin-top: var(--s-5);
   text-align: left;
 }
 
@@ -413,8 +423,8 @@ body::before {
   gap: 2px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 16px 20px;
+  border-radius: var(--radius);
+  padding: var(--s-3);
   color: var(--text-2);
 }
 
@@ -442,16 +452,16 @@ body::before {
   text-wrap: balance;
 }
 
-.scrape-row { display: flex; gap: 8px; width: 100%; }
+.scrape-row { display: flex; gap: var(--s-1); width: 100%; }
 
 .scrape-input {
   flex: 1;
   min-width: 0;
   min-height: 48px;
-  padding: 0 18px;
+  padding: 0 var(--s-2);
   background: transparent;
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius);
   color: var(--text);
   font: 400 1rem/1 var(--sans);
   transition: border-color var(--hover) ease, background-color var(--hover) ease;
@@ -464,10 +474,10 @@ body::before {
 
 .scrape-btn {
   min-height: 48px;
-  padding: 0 20px;
+  padding: 0 var(--s-3);
   background: rgba(243, 234, 216, 0.1);
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius);
   color: var(--text);
   cursor: pointer;
   font: 500 1rem/1 var(--sans);
@@ -495,14 +505,12 @@ body::before {
 /* ── Small screens ────────────────────────────────────────────────────── */
 
 @media (max-width: 520px) {
-  .topbar { padding: 16px 20px; }
-  .content { padding: 4px 20px 32px; justify-content: flex-start; }
-  .hero { margin-top: 12vh; }
+  .topbar { padding: var(--s-2) 20px; }
+  .content { padding: var(--s-1) 20px var(--s-5); }
   .candle--off { width: 112px; height: 112px; }
   .call-orb { width: 150px; height: 150px; }
   .orb-core { inset: 26px; }
-  #screen-main { margin-top: 22px; }
-  .hello { margin-top: 8px; }
+
 }
 
 /* ── Reduced motion: no transform animation, state still readable ─────── */
@@ -518,3 +526,6 @@ body::before {
   .call-orb.listening .orb-glow { opacity: 0.85; }
   *, *::before, *::after { transition-duration: 0.01ms !important; }
 }
+
+/* Disclosure under the restaurant field: its own block, not glued to the input */
+#ai-disclosure { margin-top: var(--s-4); }

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!-- Dev-only: renders index.html in a frame of a given size and fakes a call state.
+     states.html?w=375&h=812&state=speaking&card=1 (state=out keeps the logged-out page) -->
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:#000}iframe{border:0;display:block}</style></head>
+<body><iframe id="f"></iframe>
+<script>
+  const q = new URLSearchParams(location.search);
+  const f = document.getElementById('f');
+  f.width = q.get('w') || 1440; f.height = q.get('h') || 900;
+  f.src = '/index.html';
+  f.onload = () => setTimeout(() => {
+    const w = f.contentWindow;
+    w.gsap?.globalTimeline.getChildren(true, true, false).forEach(t => t.progress(1));
+    if (q.get('state') === 'out') return;
+    const s = w.document.createElement('script');
+    s.src = '/refs/sim-state.js';
+    s.onload = () => w.simState(q.get('state') || 'idle', q.get('card') === '1');
+    w.document.head.append(s);
+  }, 3000);
+</script></body></html>
