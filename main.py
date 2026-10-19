@@ -1066,15 +1066,16 @@ def session_start(user=Depends(_get_user)) -> JSONResponse:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
     try:
         with _track("elevenlabs_token:session_start"):
+            # Websocket = signed URL. Il token di /conversation/token oggi e' per WebRTC:
+            # messo in un URL wss la sessione si chiude con 1011 (verificato il 19/10/2026).
             resp = _requests.get(
-                "https://api.elevenlabs.io/v1/convai/conversation/token",
+                "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
                 params={"agent_id": AGENT_ID},
                 headers={"xi-api-key": api_key},
                 timeout=10,
             )
             resp.raise_for_status()
-            data = resp.json()
-            signed_url = f"wss://api.elevenlabs.io/v1/convai/conversation?token={data['token']}"
+            signed_url = resp.json()["signed_url"]
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"ElevenLabs error: {e}")
 
