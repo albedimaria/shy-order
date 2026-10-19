@@ -1,126 +1,164 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="it" class="reveal-pending">
+<!-- avoid-ai-design-ignore-file: K7, SD5 — K7: focus-visible styles live in style.css; SD5: approved direction B, the whole second tagline line is italic as in the artboard -->
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#13201a" />
   <title>Shy Order</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..700;1,6..96,400..700&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
-  <script src="https://js.stripe.com/v3/"></script>
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.9.0/+esm" crossorigin />
+  <script>
+    // Entrance reveal: content starts hidden only while JS is alive, and is
+    // always released after 2.5 s even if GSAP never loads.
+    window.__revealFallback = setTimeout(() => document.documentElement.classList.remove('reveal-pending'), 2500);
+  </script>
+  <script src="https://js.stripe.com/v3/" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/SplitText.min.js" defer></script>
 </head>
 <body>
 
-  <!-- ── Top-left: language switcher ──────────────────────────── -->
-  <div class="top-bar-left">
-    <button class="lang-btn" data-lang="it">IT</button>
-    <span class="lang-sep">·</span>
-    <button class="lang-btn" data-lang="en">EN</button>
-    <span class="lang-sep">·</span>
-    <button class="lang-btn" data-lang="es">ES</button>
-  </div>
+  <!-- ── Header: brand left, language + account right ─────────────── -->
+  <header class="topbar">
+    <span class="brand">shy order</span>
 
-  <!-- ── Top-right: profile icon + dropdown ───────────────────── -->
-  <div class="top-bar-right hidden" id="profile-area">
-    <button class="profile-btn" id="profile-btn" aria-label="Account">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="8" r="4"/>
-        <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-      </svg>
-    </button>
-    <div class="profile-dropdown hidden" id="profile-dropdown">
-      <span class="dropdown-name" id="dropdown-name"></span>
-      <button id="logout-btn" class="dropdown-logout"></button>
+    <div class="topbar-right">
+      <div class="menu-wrap" id="lang-area">
+        <button class="pill-btn" id="lang-toggle" type="button" aria-expanded="false" aria-controls="lang-menu">
+          <span id="lang-current">IT</span>
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="menu hidden" id="lang-menu">
+          <button class="lang-btn menu-item" data-lang="it" type="button">Italiano</button>
+          <button class="lang-btn menu-item" data-lang="en" type="button">English</button>
+          <button class="lang-btn menu-item" data-lang="es" type="button">Español</button>
+        </div>
+      </div>
+
+      <div class="menu-wrap hidden" id="profile-area">
+        <button class="round-btn" id="profile-btn" type="button" aria-label="Account" aria-expanded="false" aria-controls="profile-dropdown">
+          <span id="profile-initial" aria-hidden="true"></span>
+        </button>
+        <div class="menu hidden" id="profile-dropdown">
+          <span class="menu-note" id="dropdown-name"></span>
+          <button id="logout-btn" class="menu-item" type="button"></button>
+        </div>
+      </div>
     </div>
-  </div>
+  </header>
 
-  <!-- ── Page content ──────────────────────────────────────────── -->
-  <div class="content">
+  <!-- ── Page content ──────────────────────────────────────────────── -->
+  <main class="content">
 
-    <div id="logo" class="logo">shy order</div>
-    <div id="greeting" class="greeting hidden"></div>
-    <div id="tagline" class="tagline"></div>
+    <!-- Logged out: candle, tagline, one plain line -->
+    <section id="logo" class="hero">
+      <div class="candle candle--off" aria-hidden="true" data-reveal></div>
+      <h1 id="tagline" class="hero-title"><span class="line">Essere timidi </span><span class="line line--em">ha il suo fascino.</span></h1>
+      <p id="pitch" class="hero-sub" data-reveal>Dici a voce cosa ti serve. Al telefono con il ristorante ci pensa Shy Order.</p>
+    </section>
+
+    <!-- Logged in: greeting -->
+    <section id="greeting" class="hello hidden">
+      <h1 id="greeting-name" class="hello-title" data-reveal></h1>
+      <p id="greeting-sub" class="hello-sub" data-reveal></p>
+    </section>
 
     <!-- ── Auth screen ─────────────────────────────────────────── -->
     <div id="screen-auth" class="screen hidden">
-      <a href="https://shy-order.onrender.com/auth/google" class="google-btn">
+      <a href="https://shy-order.onrender.com/auth/google" class="primary-btn google-btn" data-reveal>
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615Z" fill="#4285F4"/>
           <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18Z" fill="#34A853"/>
           <path d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332Z" fill="#FBBC05"/>
           <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.961L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58Z" fill="#EA4335"/>
         </svg>
-        <span id="google-btn-text"></span>
+        <span id="google-btn-text">Continua con Google</span>
       </a>
-      <p id="auth-error" class="form-error"></p>
+      <p id="auth-error" class="form-error" role="alert"></p>
+      <p id="auth-disclosure" class="disclosure" data-reveal>Shy Order è un assistente AI: parli con un sistema automatico, non con una persona.</p>
     </div>
 
-    <!-- ── Payment setup screen ───────────────────────────────── -->
+    <!-- ── Payment setup screen (only when PAYMENTS_ENABLED) ───── -->
     <div id="screen-payment" class="screen hidden">
       <p id="payment-title" class="section-title"></p>
       <p id="payment-sub" class="section-sub"></p>
       <div id="card-element" class="card-element"></div>
-      <button id="save-card-btn" class="primary-btn"></button>
-      <p id="payment-error" class="form-error"></p>
+      <button id="save-card-btn" class="primary-btn" type="button"></button>
+      <p id="payment-error" class="form-error" role="alert"></p>
     </div>
 
     <!-- ── Main screen ────────────────────────────────────────── -->
     <div id="screen-main" class="screen hidden">
-      <div class="scrape-section">
-        <div class="scrape-row">
-          <input
-            type="url"
-            id="restaurant-url"
-            class="scrape-input"
-          />
-          <button id="scrape-btn" class="scrape-btn"></button>
-        </div>
-        <div id="scrape-result" class="scrape-result"></div>
-      </div>
-
-      <p id="no-data-hint" class="no-data-hint"></p>
-
-      <div class="call-area">
+      <div class="call-area" data-reveal>
         <button id="call-orb" class="call-orb" type="button" aria-label="">
-          <span class="orb-core"></span>
+          <span class="orb-glow" aria-hidden="true"></span>
+          <span class="orb-core" aria-hidden="true"></span>
         </button>
         <p id="call-label" class="call-label"></p>
-        <p id="ai-disclosure" class="ai-disclosure"></p>
-        <p id="call-error" class="form-error"></p>
+        <p id="call-error" class="form-error" role="alert"></p>
       </div>
+
+      <div class="scrape-section" data-reveal>
+        <div id="scrape-result" class="scrape-result" aria-live="polite"></div>
+        <p id="no-data-hint" class="no-data-hint"></p>
+        <form class="scrape-row" id="scrape-form" novalidate>
+          <label class="sr-only" for="restaurant-url" id="restaurant-url-label"></label>
+          <input type="url" id="restaurant-url" class="scrape-input" inputmode="url" autocomplete="url" />
+          <button id="scrape-btn" class="scrape-btn" type="submit"></button>
+        </form>
+      </div>
+
+      <p id="ai-disclosure" class="disclosure" data-reveal>Shy Order è un assistente AI: parli con un sistema automatico, non con una persona.</p>
     </div>
 
-  </div><!-- /.content -->
+  </main>
 
   <script type="module">
-    import { Conversation } from 'https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.9.0/+esm';
+    // The voice SDK is loaded on first use, so the page renders (and the
+    // Italian fallback copy stays readable) even if this CDN is slow or down.
+    const ELEVENLABS_CLIENT = 'https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.9.0/+esm';
 
     // ── Translations ───────────────────────────────────────────────────────────
     const LANGS = {
       it: {
+        code:           'IT',
         langName:       'italiano',
-        tagline:        'essere timidi ha il suo fascino',
-        greeting:       (name) => `ciao ${name},\nprenota un tavolo o ordina cibo senza chiamare davvero`,
+        langLabel:      'Lingua',
+        tagline:        ['Essere timidi', 'ha il suo fascino.'],
+        pitch:          'Dici a voce cosa ti serve. Al telefono con il ristorante ci pensa Shy Order.',
+        greeting:       (name) => `Ciao ${name}.`,
+        greetingSub:    'Prenota un tavolo o ordina, senza telefonare tu.',
         actionText:     'Parla con Shy Order',
         aiDisclosure:   'Shy Order è un assistente AI: parli con un sistema automatico, non con una persona.',
         startCallText:  'Inizia la chiamata',
         endCallText:    'Termina la chiamata',
-        listeningText:  'In ascolto…',
+        listeningText:  'Ti ascolto…',
         speakingText:   'Sto parlando…',
         googleBtn:      'Continua con Google',
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
         saveCard:       'Salva carta',
-        scrapeInput:    'incolla il link del ristorante',
+        scrapeInput:    'link del ristorante',
         scrapeBtn:      'Cerca',
-        noDataHint:     '💡 Suggerimento: prima di iniziare, tieni a portata di mano il numero di telefono e l\'indirizzo del ristorante.',
+        noDataHint:     'Hai il link del ristorante? Incollalo qui: numero e indirizzo restano sotto gli occhi mentre parli.',
         logout:         'Esci',
         authError:      'Errore durante il login con Google.',
         scrapeFail:     'Nessun dato trovato.',
+        scrapeError:    'Non riesco a leggere quel link.',
         callFail:       'Impossibile avviare la chiamata.',
       },
       en: {
+        code:           'EN',
         langName:       'english',
-        tagline:        'being shy has its charm',
-        greeting:       (name) => `hey ${name},\nbook a table or order food without actually calling`,
+        langLabel:      'Language',
+        tagline:        ['Being shy', 'has its charm.'],
+        pitch:          'Say out loud what you need. Shy Order makes the phone call to the restaurant.',
+        greeting:       (name) => `Hi ${name}.`,
+        greetingSub:    'Book a table or order food, without making the call yourself.',
         actionText:     'Talk to Shy Order',
         aiDisclosure:   'Shy Order is an AI assistant: you\'re talking to an automated system, not a person.',
         startCallText:  'Start call',
@@ -131,34 +169,40 @@
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
         saveCard:       'Save card',
-        scrapeInput:    'paste the restaurant link here',
+        scrapeInput:    'restaurant link',
         scrapeBtn:      'Search',
-        noDataHint:     '💡 Tip: before starting, have the restaurant\'s phone number and address handy.',
-        logout:         'Logout',
+        noDataHint:     'Got the restaurant\'s link? Paste it here and keep the number and address in view while you talk.',
+        logout:         'Log out',
         authError:      'Error during Google login.',
         scrapeFail:     'No data found.',
+        scrapeError:    'I can\'t read that link.',
         callFail:       'Could not start the call.',
       },
       es: {
+        code:           'ES',
         langName:       'español',
-        tagline:        'ser tímido tiene su encanto',
-        greeting:       (name) => `hola ${name},\nreserva una mesa o pide comida sin llamar de verdad`,
+        langLabel:      'Idioma',
+        tagline:        ['Ser tímido', 'tiene su encanto.'],
+        pitch:          'Di en voz alta lo que necesitas. La llamada al restaurante la hace Shy Order.',
+        greeting:       (name) => `Hola ${name}.`,
+        greetingSub:    'Reserva una mesa o pide comida, sin llamar tú.',
         actionText:     'Habla con Shy Order',
         aiDisclosure:   'Shy Order es un asistente de IA: hablas con un sistema automático, no con una persona.',
         startCallText:  'Iniciar llamada',
         endCallText:    'Finalizar llamada',
-        listeningText:  'Escuchando…',
+        listeningText:  'Te escucho…',
         speakingText:   'Hablando…',
         googleBtn:      'Continuar con Google',
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
         saveCard:       'Guardar tarjeta',
-        scrapeInput:    'pega aquí el enlace del restaurante',
+        scrapeInput:    'enlace del restaurante',
         scrapeBtn:      'Buscar',
-        noDataHint:     '💡 Sugerencia: antes de empezar, ten a mano el número de teléfono y la dirección del restaurante.',
+        noDataHint:     '¿Tienes el enlace del restaurante? Pégalo aquí y tendrás el número y la dirección a la vista mientras hablas.',
         logout:         'Salir',
         authError:      'Error durante el inicio de sesión con Google.',
         scrapeFail:     'No se encontraron datos.',
+        scrapeError:    'No puedo leer ese enlace.',
         callFail:       'No se pudo iniciar la llamada.',
       },
     };
@@ -172,7 +216,7 @@
     let stripeObj      = null;
     let cardElement    = null;
     let restaurantData = {};
-    let currentLang    = localStorage.getItem('lang') || 'it';
+    let currentLang    = LANGS[localStorage.getItem('lang')] ? localStorage.getItem('lang') : 'it';
     let displayName    = '';
 
     // ── Voice call state ───────────────────────────────────────────────────────
@@ -241,28 +285,53 @@
     }
 
     // ── Language ───────────────────────────────────────────────────────────────
+    // Tagline: two lines, the second one in italic. Each line sits in its own
+    // block so the break is always where the sentence breaks.
+    function renderTagline(lines) {
+      const el = document.getElementById('tagline');
+      el.replaceChildren(...lines.map((text, i) => {
+        const span = document.createElement('span');
+        span.className = i === 0 ? 'line' : 'line line--em';
+        span.textContent = i < lines.length - 1 ? text + ' ' : text;
+        return span;
+      }));
+    }
+
+    function renderGreeting() {
+      const t = LANGS[currentLang];
+      document.getElementById('greeting-name').textContent = displayName ? t.greeting(displayName) : '';
+      document.getElementById('greeting-sub').textContent  = t.greetingSub;
+    }
+
     function setLanguage(lang) {
       currentLang = lang;
       localStorage.setItem('lang', lang);
       const t = LANGS[lang];
 
       document.documentElement.lang = lang;
-      document.getElementById('tagline').textContent         = t.tagline;
-      if (displayName) document.getElementById('greeting').textContent = t.greeting(displayName);
+      renderTagline(t.tagline);
+      renderGreeting();
+      document.getElementById('pitch').textContent           = t.pitch;
       document.getElementById('google-btn-text').textContent = t.googleBtn;
+      document.getElementById('auth-disclosure').textContent = t.aiDisclosure;
       document.getElementById('payment-title').textContent   = t.paymentTitle;
       document.getElementById('payment-sub').textContent     = t.paymentSub;
       document.getElementById('save-card-btn').textContent   = t.saveCard;
       document.getElementById('restaurant-url').placeholder  = t.scrapeInput;
+      document.getElementById('restaurant-url-label').textContent = t.scrapeInput;
       document.getElementById('no-data-hint').textContent    = t.noDataHint;
       document.getElementById('ai-disclosure').textContent   = t.aiDisclosure;
       document.getElementById('logout-btn').textContent      = t.logout;
+      document.getElementById('lang-current').textContent    = t.code;
+      document.getElementById('lang-toggle').setAttribute('aria-label', `${t.langLabel}: ${t.langName}`);
 
       const scrapeBtn = document.getElementById('scrape-btn');
       if (!scrapeBtn.disabled) scrapeBtn.textContent = t.scrapeBtn;
 
       document.querySelectorAll('.lang-btn').forEach(b => {
-        b.classList.toggle('active', b.dataset.lang === lang);
+        const on = b.dataset.lang === lang;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
       });
 
       refreshCallUI();
@@ -302,24 +371,54 @@
     function setCallState(state) {
       callState = state;
       const orb = document.getElementById('call-orb');
-      orb.classList.remove('connecting', 'active', 'listening', 'speaking');
+      orb.classList.remove('connecting', 'active', 'listening', 'speaking', 'ending');
       if (state === 'connecting') orb.classList.add('connecting');
       if (state === 'active')     orb.classList.add('active', 'listening');
+      if (state === 'ending')     orb.classList.add('ending');
       refreshCallUI();
     }
 
+    // ── Header menus (language + account) ──────────────────────────────────────
+    function setMenu(toggle, menu, open) {
+      menu.classList.toggle('hidden', !open);
+      toggle.setAttribute('aria-expanded', String(open));
+    }
+
+    function closeMenus() {
+      setMenu(document.getElementById('lang-toggle'), document.getElementById('lang-menu'), false);
+      setMenu(document.getElementById('profile-btn'), document.getElementById('profile-dropdown'), false);
+    }
+
+    function bindMenu(toggleId, menuId) {
+      const toggle = document.getElementById(toggleId);
+      const menu   = document.getElementById(menuId);
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = menu.classList.contains('hidden');
+        closeMenus();
+        setMenu(toggle, menu, open);
+        if (open) menu.querySelector('.menu-item')?.focus();
+      });
+      menu.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    bindMenu('lang-toggle', 'lang-menu');
+    bindMenu('profile-btn', 'profile-dropdown');
+
+    document.addEventListener('click', closeMenus);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const openToggle = document.querySelector('[aria-expanded="true"]');
+      closeMenus();
+      openToggle?.focus();
+    });
+
     document.querySelectorAll('.lang-btn').forEach(btn => {
-      btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
-    });
-
-    // ── Profile dropdown ───────────────────────────────────────────────────────
-    document.getElementById('profile-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      document.getElementById('profile-dropdown').classList.toggle('hidden');
-    });
-
-    document.addEventListener('click', () => {
-      document.getElementById('profile-dropdown').classList.add('hidden');
+      btn.addEventListener('click', () => {
+        setLanguage(btn.dataset.lang);
+        closeMenus();
+        document.getElementById('lang-toggle').focus();
+      });
     });
 
     // ── Auth state ─────────────────────────────────────────────────────────────
@@ -327,10 +426,12 @@
       displayName = name;
       document.getElementById('logo').classList.add('hidden');
       document.getElementById('tagline').classList.add('hidden');
-      document.getElementById('greeting').textContent = LANGS[currentLang].greeting(name);
+      renderGreeting();
       document.getElementById('greeting').classList.remove('hidden');
       document.getElementById('dropdown-name').textContent = name;
+      document.getElementById('profile-initial').textContent = (name || '?').charAt(0).toUpperCase();
       document.getElementById('profile-area').classList.remove('hidden');
+      reveal(document.getElementById('greeting'));
     }
 
     function setLoggedOut() {
@@ -339,17 +440,62 @@
       document.getElementById('tagline').classList.remove('hidden');
       document.getElementById('greeting').classList.add('hidden');
       document.getElementById('profile-area').classList.add('hidden');
-      document.getElementById('profile-dropdown').classList.add('hidden');
+      closeMenus();
+      document.getElementById('logo').classList.remove('is-checking');
+      reveal(document.getElementById('logo'));
+    }
+
+    // ── Entrance reveal (GSAP, slow expo-out; never blocks content) ────────────
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const revealed = new WeakSet();
+
+    function releaseReveal() {
+      clearTimeout(window.__revealFallback);
+      document.documentElement.classList.remove('reveal-pending');
+    }
+
+    function reveal(root) {
+      if (!root || revealed.has(root)) return;
+      revealed.add(root);
+      const gsap = window.gsap;
+      const items = [...root.querySelectorAll('[data-reveal]')];
+      // Release the CSS pre-hide first: gsap.from() reads the end state from
+      // the computed style, and sets the start state inline in the same frame.
+      releaseReveal();
+      if (!gsap || reduceMotion) return;
+
+      const tl = gsap.timeline({ defaults: { duration: 1.3, ease: 'expo.out' } });
+      if (items.length) tl.from(items, { opacity: 0, y: 18, stagger: 0.15, clearProps: 'opacity,transform' }, 0);
+
+      // Title lines rise out of a mask. Split only once the webfont is in
+      // (line boxes depend on it), waiting at most 1.5 s.
+      const title = root.querySelector('.hero-title');
+      if (title && window.SplitText) {
+        gsap.registerPlugin(window.SplitText);
+        gsap.set(title, { autoAlpha: 0 });
+        const fontsIn = Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 1500))]);
+        fontsIn.then(() => {
+          const split = new window.SplitText(title.querySelectorAll('.line'), { type: 'lines', mask: 'lines' });
+          gsap.set(title, { autoAlpha: 1 });
+          gsap.from(split.lines, { yPercent: 105, duration: 1.3, ease: 'expo.out', stagger: 0.16, onComplete: () => split.revert() });
+        }).catch(() => gsap.set(title, { autoAlpha: 1 }));
+      }
     }
 
     // ── Screens ────────────────────────────────────────────────────────────────
     function showScreen(name) {
       document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
-      document.getElementById(`screen-${name}`).classList.remove('hidden');
+      const screen = document.getElementById(`screen-${name}`);
+      screen.classList.remove('hidden');
+      reveal(screen);
     }
 
     // ── API helper ─────────────────────────────────────────────────────────────
-    const BASE = 'https://shy-order.onrender.com';
+    // Local dev (uvicorn on localhost) talks to its own origin; everywhere
+    // else the frontend talks to the Render backend.
+    const IS_LOCAL = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const BASE = IS_LOCAL ? '' : 'https://shy-order.onrender.com';
+    document.querySelector('.google-btn').href = `${BASE}/auth/google`;
 
     function api(path, opts = {}) {
       const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -364,7 +510,7 @@
       stripeObj = Stripe(stripe_publishable_key);
       const elements = stripeObj.elements({ appearance: { theme: 'night' } });
       cardElement = elements.create('card', {
-        style: { base: { color: '#f0f0f0', fontFamily: 'Georgia, serif', fontSize: '14px', '::placeholder': { color: '#555' } } },
+        style: { base: { color: '#f3ead8', fontFamily: 'Figtree, sans-serif', fontSize: '16px', '::placeholder': { color: '#c3bba8' } } },
       });
       cardElement.mount('#card-element');
     }
@@ -389,11 +535,26 @@
     });
 
     // ── Scrape ─────────────────────────────────────────────────────────────────
-    document.getElementById('scrape-btn').addEventListener('click', async () => {
+    // Scraped values come from a third-party page: rendered with textContent only.
+    function renderRestaurantCard(result, data) {
+      const name  = document.createElement('strong');
+      name.className = 'restaurant-name';
+      name.textContent = data.name || '';
+      const lines = [data.phone_number, data.address, data.hours].filter(Boolean).map(text => {
+        const p = document.createElement('span');
+        p.className = 'restaurant-line';
+        p.textContent = text;
+        return p;
+      });
+      result.replaceChildren(...(data.name ? [name] : []), ...lines);
+    }
+
+    document.getElementById('scrape-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
       const url    = document.getElementById('restaurant-url').value.trim();
       const btn    = document.getElementById('scrape-btn');
       const result = document.getElementById('scrape-result');
-      if (!url) return;
+      if (!url || btn.disabled) return;
 
       btn.disabled = true;
       btn.textContent = '…';
@@ -405,11 +566,13 @@
         if (!res.ok) throw new Error(await res.text());
         restaurantData = await res.json();
         const parts = [restaurantData.name, restaurantData.phone_number, restaurantData.address, restaurantData.hours].filter(Boolean);
-        result.textContent = parts.length ? parts.join(' · ') : LANGS[currentLang].scrapeFail;
+        if (parts.length) renderRestaurantCard(result, restaurantData);
+        else result.textContent = LANGS[currentLang].scrapeFail;
         result.classList.add(parts.length ? 'found' : 'empty');
         document.getElementById('no-data-hint').hidden = parts.length > 0;
       } catch (err) {
-        result.textContent = 'Errore: ' + err.message;
+        console.error('Scrape failed:', err);
+        result.textContent = LANGS[currentLang].scrapeError;
         result.classList.add('error');
       } finally {
         btn.disabled = false;
@@ -435,6 +598,13 @@
         // Make sure the access token is fresh before hitting the backend.
         const ok = await ensureFreshToken();
         if (!ok) throw new Error(LANGS[currentLang].authError);
+
+        // Load the voice SDK before the backend opens a session row, so a CDN
+        // failure never leaves an open session behind.
+        const { Conversation } = await import(ELEVENLABS_CLIENT).catch((e) => {
+          console.error('Voice SDK failed to load:', e);
+          throw new Error(LANGS[currentLang].callFail);
+        });
 
         // 1. Backend checks the payment method, creates the session row, and
         //    returns a short-lived signed WebSocket URL.
@@ -524,6 +694,13 @@
     });
 
     // ── Init ───────────────────────────────────────────────────────────────────
+    // Logged-out hero back on screen (title + pitch), then the auth screen.
+    function showAuth() {
+      document.getElementById('logo').classList.remove('is-checking');
+      reveal(document.getElementById('logo'));
+      showScreen('auth');
+    }
+
     async function init() {
       setLanguage(currentLang);
 
@@ -531,6 +708,10 @@
       const hashToken     = hash.get('access_token');
       const hashRefresh   = hash.get('refresh_token');
       const hashExpiresIn = parseInt(hash.get('expires_in') || '3600', 10);
+
+      // A returning user may wait for a Render cold start (~50 s): keep the
+      // candle lit and hide the logged-out pitch until we know who they are.
+      if (hashToken || token) document.getElementById('logo').classList.add('is-checking');
 
       if (hashToken) {
         window.history.replaceState({}, '', '/');
@@ -546,29 +727,31 @@
           else { await initStripe(); showScreen('payment'); }
         } catch (_) {
           document.getElementById('auth-error').textContent = LANGS[currentLang].authError;
-          showScreen('auth');
+          showAuth();
         }
         return;
       }
 
-      if (!token) { showScreen('auth'); return; }
+      if (!token) { showAuth(); return; }
 
       // Refresh token if expired or expiring within 1 hour
       const stillValid = await ensureFreshToken();
-      if (!stillValid) { clearTokens(); showScreen('auth'); return; }
+      if (!stillValid) { clearTokens(); showAuth(); return; }
 
       try {
         const res = await api('/payment/status');
-        if (res.status === 401) { clearTokens(); showScreen('auth'); return; }
+        if (res.status === 401) { clearTokens(); showAuth(); return; }
         const { has_payment_method } = await res.json();
         setLoggedIn(displayNameFromToken(token));
         if (!has_payment_method) { await initStripe(); showScreen('payment'); }
         else showScreen('main');
       } catch (_) {
-        showScreen('auth');
+        showAuth();
       }
     }
 
+    // GSAP is loaded with `defer`; module scripts run after deferred classic
+    // scripts, so window.gsap is ready here when the CDN answered.
     init();
   </script>
 
