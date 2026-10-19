@@ -14,10 +14,13 @@ window.simState = (state, withCard = true) => {
   document.querySelectorAll('[data-reveal]').forEach(e => { e.style.opacity = 1; e.style.transform = 'none'; });
   const orb = $('call-orb');
   orb.className = 'call-orb';
-  const labels = { idle: 'Parla con Shy Order', connecting: 'Inizia la chiamata…', listening: 'Ti ascolto…', speaking: 'Sto parlando…' };
+  const labels = { idle: 'Parla con Shy Order', connecting: 'Inizia la chiamata…', listening: 'Ti ascolto…', speaking: 'Sto parlando…', calling: 'Sto chiamando il ristorante…' };
   if (state === 'connecting') orb.classList.add('connecting');
   if (state === 'listening') orb.classList.add('active', 'listening');
   if (state === 'speaking') orb.classList.add('active', 'speaking');
+  if (state === 'calling') orb.classList.add('active', 'listening', 'calling');
+  $('call-note').hidden = state !== 'calling';
+  $('call-note-text').textContent = "Resta in attesa, ti dico io com'è andata."; $('call-note-mic').textContent = 'Il tuo microfono è in pausa.';
   $('call-label').textContent = labels[state];
   const r = $('scrape-result');
   if (withCard) {

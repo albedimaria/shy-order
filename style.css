@@ -378,6 +378,21 @@ body::before {
 /* speaking: brighter, a little quicker (continuous loops stay >= 2.5 s) */
 .call-orb.speaking .orb-glow { animation: candle-speak 2.6s var(--ease-breathe) infinite; }
 
+/* calling the restaurant: the flame lowers and waits, a ring travels out
+   slowly like a ringing phone (3.2 s per ring) */
+.call-orb.calling .orb-glow { animation: candle-breathe 3.4s var(--ease-breathe) infinite; opacity: 0.7; }
+.call-orb.calling .orb-core {
+  opacity: 1;
+  inset: 0;
+  border-color: rgba(240, 180, 94, 0.55);
+  animation: candle-ring 3.2s var(--ease-out) infinite;
+}
+
+@keyframes candle-ring {
+  0%   { opacity: 0.7; transform: scale(0.82); }
+  100% { opacity: 0;   transform: scale(1.3); }
+}
+
 /* ending: the flame goes down */
 .call-orb.ending .orb-glow { opacity: 0.2; transform: scale(0.85); }
 
@@ -395,6 +410,20 @@ body::before {
   0%, 100% { opacity: 1;    transform: scale(1.04); }
   50%      { opacity: 0.88; transform: scale(1.16); }
 }
+
+.call-note {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: var(--s-1);
+  color: var(--text-2);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.mic-paused { display: inline-flex; align-items: center; gap: 6px; color: var(--amber); }
+.mic-paused svg { flex-shrink: 0; }
 
 .call-label {
   color: var(--text);
@@ -520,6 +549,7 @@ body::before {
   .call-orb.connecting .orb-glow,
   .call-orb.listening .orb-glow,
   .call-orb.speaking .orb-glow { animation: none; transform: none; }
+  .call-orb.calling .orb-core { animation: none; opacity: 1; transform: none; }
   .hero.is-checking .candle--off { animation: none; }
   .call-orb.connecting .orb-glow { opacity: 0.6; }
   .call-orb.speaking .orb-glow { opacity: 1; filter: brightness(1.08); }

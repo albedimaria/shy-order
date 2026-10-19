@@ -99,6 +99,13 @@
           <span class="orb-core" aria-hidden="true"></span>
         </button>
         <p id="call-label" class="call-label"></p>
+        <p id="call-note" class="call-note" role="status" hidden>
+          <span id="call-note-text"></span>
+          <span class="mic-paused">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9v3a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.8"/><path d="M19 11a7 7 0 0 1-1.2 3.9M5 11a7 7 0 0 0 11.2 5.6M12 18v3M3 3l18 18"/></svg>
+            <span id="call-note-mic"></span>
+          </span>
+        </p>
         <p id="call-error" class="form-error" role="alert"></p>
       </div>
 
@@ -138,6 +145,9 @@
         endCallText:    'Termina la chiamata',
         listeningText:  'Ti ascolto…',
         speakingText:   'Sto parlando…',
+        callingText:    'Sto chiamando il ristorante…',
+        callingNote:    "Resta in attesa, ti dico io com'è andata.",
+        micPaused:      'Il tuo microfono è in pausa.',
         googleBtn:      'Continua con Google',
         paymentTitle:   'Aggiungi una carta',
         paymentSub:     'Ti verrà addebitato €0,15/min + €0,20 a conversazione.',
@@ -165,6 +175,9 @@
         endCallText:    'End call',
         listeningText:  'Listening…',
         speakingText:   'Speaking…',
+        callingText:    'Calling the restaurant…',
+        callingNote:    "Hold on, I'll tell you how it went.",
+        micPaused:      'Your mic is paused.',
         googleBtn:      'Continue with Google',
         paymentTitle:   'Add a card',
         paymentSub:     'You\'ll be charged €0.15/min + €0.20 per conversation.',
@@ -192,6 +205,9 @@
         endCallText:    'Finalizar llamada',
         listeningText:  'Te escucho…',
         speakingText:   'Hablando…',
+        callingText:    'Llamando al restaurante…',
+        callingNote:    'Espera, te cuento cómo ha ido.',
+        micPaused:      'Tu micrófono está en pausa.',
         googleBtn:      'Continuar con Google',
         paymentTitle:   'Añade una tarjeta',
         paymentSub:     'Se te cobrará €0,15/min + €0,20 por conversación.',
@@ -224,6 +240,7 @@
     let activeSessionId  = null;          // backend session row id
     let callState        = 'idle';        // idle | connecting | active | ending
     let endingInProgress = false;         // guards a single /session/end per session
+    let restaurantCall   = false;         // the caller agent is on the phone with the restaurant
 
     // ── JWT decode ─────────────────────────────────────────────────────────────
     function parseJwt(t) {
@@ -358,7 +375,8 @@
           orb.setAttribute('aria-label', t.startCallText);
           break;
         case 'active':
-          label.textContent = orb.classList.contains('speaking') ? t.speakingText : t.listeningText;
+          label.textContent = restaurantCall ? t.callingText
+            : orb.classList.contains('speaking') ? t.speakingText : t.listeningText;
           orb.setAttribute('aria-label', t.endCallText);
           break;
         case 'ending':
@@ -366,6 +384,25 @@
           orb.setAttribute('aria-label', t.endCallText);
           break;
       }
+      document.getElementById('call-note-text').textContent = t.callingNote;
+      document.getElementById('call-note-mic').textContent  = t.micPaused;
+    }
+
+    // ── Restaurant phone call in progress ─────────────────────────────────────
+    // make_restaurant_call / check_call_status are server-side webhook tools;
+    // the agent emits agent_tool_request / agent_tool_response client events
+    // around them. While the caller agent is on the phone, the browser mic is
+    // muted: otherwise it hears the room (or the phone) and interrupts the
+    // site agent, which then retries the call.
+    const PHONE_TOOLS = new Set(['make_restaurant_call', 'check_call_status']);
+
+    function setRestaurantCall(on) {
+      if (restaurantCall === on) return;
+      restaurantCall = on;
+      try { conversation?.setMicMuted(on); } catch (e) { console.error('setMicMuted failed:', e); }
+      document.getElementById('call-orb').classList.toggle('calling', on);
+      document.getElementById('call-note').hidden = !on;
+      refreshCallUI();
     }
 
     function setCallState(state) {
@@ -645,6 +682,12 @@
             orb.classList.toggle('listening', !speaking);
             refreshCallUI();
           },
+          onAgentToolRequest: ({ tool_name }) => {
+            if (PHONE_TOOLS.has(tool_name)) setRestaurantCall(true);
+          },
+          onAgentToolResponse: ({ tool_name }) => {
+            if (PHONE_TOOLS.has(tool_name)) setRestaurantCall(false);
+          },
           onDisconnect: () => { endCallCleanup(); },
           onError: (message) => { console.error('ConvAI error:', message); },
         });
@@ -672,6 +715,7 @@
     //    can both land here).
     async function endCallCleanup() {
       const sessionId = activeSessionId;
+      setRestaurantCall(false);
       conversation = null;
       activeSessionId = null;
       setCallState('idle');
