@@ -343,3 +343,23 @@ def test_extract_confirmed_order_merges_negotiated_fields(monkeypatch):
 def test_delete_memory_requires_auth():
     r = client.delete("/memory")
     assert r.status_code in (401, 403)  # HTTPBearer rejects missing credentials
+
+
+# --- pagamenti in pausa (demo) ---------------------------------------------
+
+def _as_user(monkeypatch):
+    class _U:
+        id = "00000000-0000-0000-0000-000000000001"
+    main.app.dependency_overrides[main._get_user] = lambda: _U()
+
+
+def test_payment_status_skips_card_when_payments_disabled(monkeypatch):
+    monkeypatch.setattr(main, "PAYMENTS_ENABLED", False)
+    _as_user(monkeypatch)
+    try:
+        r = client.get("/payment/status")
+        assert r.status_code == 200
+        assert r.json() == {"has_payment_method": True, "payments_enabled": False}
+    finally:
+        main.app.dependency_overrides.clear()
+

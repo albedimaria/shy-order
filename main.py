@@ -108,6 +108,10 @@ supabase_auth = (
 )
 
 _stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+# Demo: pagamenti in pausa finché il prodotto è una demo. Spenti di default; per riaccenderli
+# impostare PAYMENTS_ENABLED=true su Render. Spenti = niente carta richiesta, niente addebito,
+# la durata della sessione si registra comunque.
+PAYMENTS_ENABLED = os.getenv("PAYMENTS_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 
 _openai_api_key = os.getenv("OPENAI_API_KEY", "")
 _openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
@@ -995,6 +999,8 @@ def auth_google_complete(user=Depends(_get_user)) -> JSONResponse:
 
 @app.get("/payment/status")
 def payment_status(user=Depends(_get_user)) -> JSONResponse:
+    if not PAYMENTS_ENABLED:
+        return JSONResponse({"has_payment_method": True, "payments_enabled": False})
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
         stripe_customer_id = record.data.get("stripe_customer_id")
@@ -1030,16 +1036,17 @@ def payment_setup(user=Depends(_get_user)) -> JSONResponse:
 
 @app.post("/session/start")
 def session_start(user=Depends(_get_user)) -> JSONResponse:
-    try:
-        record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
-        stripe_customer_id = record.data.get("stripe_customer_id")
-        pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
-        if not pms.data:
-            raise HTTPException(status_code=402, detail="No payment method on file")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    if PAYMENTS_ENABLED:
+        try:
+            record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
+            stripe_customer_id = record.data.get("stripe_customer_id")
+            pms = _stripe.PaymentMethod.list(customer=stripe_customer_id, type="card")
+            if not pms.data:
+                raise HTTPException(status_code=402, detail="No payment method on file")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
     try:
         session_resp = supabase_admin.table("sessions").insert({"user_id": str(user.id)}).execute()
@@ -1102,6 +1109,18 @@ def session_end(req: EndSessionRequest, user=Depends(_get_user)) -> JSONResponse
     now = datetime.now(timezone.utc)
     duration_seconds = max(1, int((now - started_at).total_seconds()))
     amount_cents = _compute_charge_cents(duration_seconds)
+
+    if not PAYMENTS_ENABLED:
+        # Demo: si registra la durata, nessun addebito.
+        try:
+            supabase_admin.table("sessions").update({
+                "ended_at": now.isoformat(),
+                "duration_seconds": duration_seconds,
+                "amount_charged": 0,
+            }).eq("id", req.session_id).eq("user_id", str(user.id)).execute()
+        except Exception:
+            _log(logging.WARNING, "session_end_update_failed_demo", exc=True, session_id=req.session_id)
+        return JSONResponse({"amount_charged": 0, "duration_seconds": duration_seconds, "payments_enabled": False})
 
     try:
         record = supabase_admin.table("users").select("stripe_customer_id").eq("id", str(user.id)).single().execute()
