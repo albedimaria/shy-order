@@ -380,3 +380,48 @@ def test_lookup_ignores_spaces_and_case(monkeypatch):
     monkeypatch.setattr(main, "supabase_admin", fake)
     out = main.lookup_restaurant_tool({"restaurant_name": "Pepe Verde"})
     assert out["found"] is True and out["name"] == "PepeVerde"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("+39 02 8940 6277", "+390289406277"),
+    ("02 89406277", "+390289406277"),
+    ("0039 0373 123456", "+390373123456"),
+    ("+33 1 23 45 67 89", ""),
+    ("non disponibile", ""),
+])
+def test_normalize_it_phone(raw, expected):
+    assert main._normalize_it_phone(raw) == expected
+
+
+def test_find_restaurant_parses_web_answer(monkeypatch):
+    class _Resp:
+        output_text = 'Ecco: {"name": "Al Pont de Ferr", "phone_number": "+39 02 8940 6277", "address": "Ripa di Porta Ticinese 55, Milano", "source_url": "https://example.com"}'
+    class _Client:
+        class responses:
+            @staticmethod
+            def create(**kw):
+                assert kw["tools"] == [{"type": "web_search"}]
+                return _Resp()
+    monkeypatch.setattr(main, "_openai_client", _Client())
+    out = main.find_restaurant_tool({"restaurant_name": "Al Pont de Ferr", "city": "Milano"})
+    assert out["found"] is True and out["phone_number"] == "+390289406277" and out["verified"] is False
+
+
+def test_find_restaurant_rejects_missing_or_foreign_number(monkeypatch):
+    class _Resp:
+        output_text = '{"name": "X", "phone_number": null, "address": ""}'
+    class _Client:
+        class responses:
+            @staticmethod
+            def create(**kw):
+                return _Resp()
+    monkeypatch.setattr(main, "_openai_client", _Client())
+    assert main.find_restaurant_tool({"restaurant_name": "X"})["found"] is False
+
+
+def test_make_call_blocks_real_numbers_without_override(monkeypatch):
+    monkeypatch.setattr(main, "_TWILIO_OVERRIDE_TO", "")
+    monkeypatch.delenv("ALLOW_REAL_CALLS", raising=False)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    out = main.make_restaurant_call_tool({"phone_number": "+390289406277", "restaurant_name": "X"})
+    assert out["success"] is False and "chiamate reali disattivate" in out["error"]
